@@ -150,3 +150,48 @@ def test_script_has_a_token_cap_branch():
     ordinary max_steps/end_turn stop."""
     script = HTML.split("<script")[1]
     assert "token_cap" in script, "no token_cap handling found in the inline script"
+
+
+# --- the verdict must say *why*, not only *what* ---------------------------
+
+
+def test_the_outcome_distinguishes_a_block_from_the_model_declining():
+    """"Attacker goal not achieved" means two completely different things.
+
+    With a defense enabled and firing, it is this demo's result. With nothing
+    enabled — which happens routinely in live mode, where the model declines
+    S3 outright — it is a fact about the model, and showing it in the same
+    green as a block would claim a win the enforcement layer did not earn.
+    """
+    script = HTML.split("<script")[1]
+    assert "stopped by" in script, "a block must name the defense that stopped it"
+    assert "declined the" in script, "a model-level refusal must be labelled as one"
+    assert "nothing stopped it" in script
+    # Three tones, not two.
+    assert '"neutral"' in script
+    assert ".outcome.neutral" in HTML and ".verdict.neutral" in HTML
+
+
+def test_an_unusable_response_is_not_presented_as_a_refusal():
+    """`no_response` covers a safety filter or a malformed tool call. Letting
+    that read as the model declining is the same conflation the eval fixes in
+    its own table (§10.4)."""
+    script = HTML.split("<script")[1]
+    assert "no_response" in script
+    assert "not evidence that it declined" in script
+
+
+def test_the_undefended_column_states_that_nothing_was_enabled():
+    """A viewer must be able to tell the baseline apart from a defended run
+    at a glance, including when the attack happens to fail."""
+    script = HTML.split("<script")[1]
+    assert "No defenses were enabled" in script
+
+
+def test_the_outcome_separates_consequential_actions_from_lookups():
+    """A live run searches repeatedly; listing every read-only call buries
+    the one line that says what the agent did to the world."""
+    script = HTML.split("<script")[1]
+    assert "a.privileged" in script
+    assert "read-only call" in script
+    assert "No privileged action was taken" in script

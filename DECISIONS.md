@@ -821,3 +821,35 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
 - **Prior art is preserved deliberately.** A demo that renames a known
   technique into its own private vocabulary makes itself harder to place, so
   the literature name stays one line away in the spec.
+
+### D-063 The verdict says why, not only what
+- **Problem:** the outcome block reported "Attacker goal not achieved" with no
+  explanation. In the undefended column — where nothing is enabled — that is
+  routine in live mode, because the model sometimes declines on its own (S3,
+  0/10). A viewer saw two columns that both looked fine and could not tell
+  whether a defense worked, the model refused, or the demo was broken.
+- **Decision:** three states, not two. Red: the attack landed. Green: a
+  defense refused the action, named. **Amber: nothing stopped it** — no
+  defense fired, and the text says the model declined by itself, that this is
+  a fact about the model rather than a result from this demo, and that it may
+  go the other way on the next run.
+- **Why amber matters:** showing a model-level refusal in the same green as a
+  block claims a win the enforcement layer did not earn. It is the same
+  conflation the scenario matrix avoids with `not_achieved_harness_limit`
+  (D-026) and the eval avoids by counting `no_response` separately (D-060),
+  now applied where a viewer actually looks.
+- **Also:** consequential actions are listed in full and read-only calls are
+  counted. A live run searches repeatedly, and listing nine `search_logs`
+  lines buried the one line saying what the agent did to the world.
+
+### D-064 The corpus database is verified, not assumed
+- **Found by running the demo**, not by review: every run started failing with
+  `no such table: memory`. A test that unset `DB_PATH` had called
+  `reset_db()`, which unlinked the running dev server's database; the "already
+  built" flag stayed true, so every later connection opened a fresh empty file.
+- **Decision:** `get_db()` checks that the expected tables exist and rebuilds
+  if they do not, instead of trusting a process-local flag.
+- **Why it matters beyond the dev loop:** the deployed service keeps its
+  database in a temp directory. A cleared `/tmp` does exactly what that test
+  did, and the symptom — every run dying — looks like the application is
+  broken rather than the database being gone.

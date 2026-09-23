@@ -1133,3 +1133,33 @@ def test_a_completed_run_removes_its_per_client_entry():
                                    "stage": 1, "mode": "mock"})
     assert app._RUNS_PER_CLIENT == {}, f"leaked per-client entries: {app._RUNS_PER_CLIENT}"
     assert app._RUNS_IN_FLIGHT["n"] == 0
+
+
+def test_a_database_deleted_underneath_a_running_process_is_rebuilt(tmp_path, monkeypatch):
+    """Observed for real: a test that unset DB_PATH called reset_db() and
+    unlinked a running dev server's database. The server's "already built"
+    flag stayed true, so every later connection opened an empty file and every
+    run died with `no such table: memory` — which reads as the app being
+    broken rather than the database being gone.
+
+    A cleared /tmp does the same thing to the deployed service.
+    """
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "corpus.db"))
+    app.reset_db()
+
+    conn = app.get_db()
+    assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] > 0
+    conn.close()
+
+    # Something external removes the file while the process still thinks it
+    # has one.
+    (tmp_path / "corpus.db").unlink()
+    assert app._DB_READY is True, "this test is only meaningful while the flag is stale"
+
+    recovered = app.get_db()
+    try:
+        assert recovered.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] > 0
+        recovered.execute("SELECT COUNT(*) FROM memory").fetchone()
+    finally:
+        recovered.close()
+        app.reset_db()

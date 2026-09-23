@@ -814,12 +814,38 @@ def get_db():
     global _DB_READY
     path = _db_path()
     with _DB_LOCK:
-        if not _DB_READY:
+        if not _DB_READY or not _schema_present(path):
+            # The flag alone is not enough: the file can vanish underneath a
+            # running process — a cleared temp directory, another process
+            # resetting the default path — and the flag would still claim the
+            # corpus was built. Every later connection then opens an empty
+            # file and every run dies with "no such table", which reads as the
+            # app being broken rather than the database being gone.
             store.build_db(path).close()
             _DB_READY = True
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
+
+
+def _schema_present(path: str) -> bool:
+    """Whether the database at `path` actually holds the tables we need."""
+    try:
+        probe = sqlite3.connect(path)
+    except sqlite3.Error:
+        return False
+    try:
+        names = {
+            row[0]
+            for row in probe.execute(
+                "SELECT name FROM sqlite_master WHERE name IN ('chunks','chunks_fts','memory')"
+            )
+        }
+        return {"chunks", "chunks_fts", "memory"} <= names
+    except sqlite3.Error:
+        return False
+    finally:
+        probe.close()
 
 
 def reset_db():

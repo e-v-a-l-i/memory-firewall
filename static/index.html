@@ -78,9 +78,11 @@
   .outcome { margin-top: 8px; border-radius: 8px; padding: 9px; border: 1px solid var(--line); }
   .outcome.bad { border-color: var(--danger); }
   .outcome.good { border-color: var(--ok); }
+  .outcome.neutral { border-color: var(--warn); }
   .verdict { font-weight: 600; }
   .verdict.bad { color: var(--danger); }
   .verdict.good { color: var(--ok); }
+  .verdict.neutral { color: var(--warn); }
   .panel { margin-top: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
   .record { border: 1px solid var(--line); border-radius: 7px; padding: 8px; margin: 7px 0; }
   .empty { color: var(--muted); font-size: .86rem; }
@@ -166,6 +168,10 @@
                      "memory_write", "blocked", "done", "error"];
   var scenarios = {};
   var streams = [];
+  // What each column has seen this run. The done event alone cannot say why
+  // an attack failed, and "not achieved" means very different things
+  // depending on whether a defense acted.
+  var armState = { undefended: null, defended: null };
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -217,13 +223,50 @@
     container.appendChild(box);
   }
 
-  function renderOutcome(container, event) {
+  function renderOutcome(container, event, arm) {
     var outcome = event.outcome || {};
     var achieved = outcome.attacker_goal_achieved === true;
-    var box = el("div", "outcome " + (achieved ? "bad" : "good"));
-    var verdict = el("div", "verdict " + (achieved ? "bad" : "good"),
-      achieved ? "Attacker goal achieved" : "Attacker goal not achieved");
-    box.appendChild(verdict);
+    var state = armState[arm] || { stopped: [], enabled: [] };
+    var stopped = state.stopped.filter(function (id, i, all) { return all.indexOf(id) === i; });
+
+    // Three outcomes, not two. "Not achieved" with no defense on is the model
+    // declining by itself — a real result, but not this demo's result, and
+    // showing it in the same green as a block would claim a win the
+    // enforcement layer did not earn.
+    var tone, headline, detail;
+    if (achieved) {
+      tone = "bad";
+      headline = "Attacker goal achieved";
+      detail = state.enabled.length
+        ? "The enabled defenses did not stop it."
+        : "No defenses were enabled.";
+    } else if (stopped.length) {
+      tone = "good";
+      headline = "Attacker goal not achieved — stopped by " + stopped.join(" + ");
+      detail = "A defense refused the action. The step that fired is marked above.";
+    } else if (!state.enabled.length) {
+      tone = "neutral";
+      headline = "Attacker goal not achieved — but nothing stopped it";
+      detail = "No defense was enabled and none fired: the model declined the " +
+               "injection on its own. That is a fact about the model, not a " +
+               "result from this demo — and it may well go the other way on " +
+               "the next run.";
+    } else {
+      tone = "neutral";
+      headline = "Attacker goal not achieved — no defense fired";
+      detail = "The enabled defenses had nothing to refuse; the model did not " +
+               "attempt the attacker's action.";
+    }
+
+    var box = el("div", "outcome " + tone);
+    box.appendChild(el("div", "verdict " + tone, headline));
+    box.appendChild(el("div", "hint", detail));
+
+    if (outcome.reason === "no_response") {
+      box.appendChild(el("div", "hint",
+        "The model returned nothing usable (a safety filter, a malformed tool " +
+        "call, or an empty response). This is not evidence that it declined."));
+    }
     box.appendChild(el("div", "hint", "alert " + (outcome.alert_status || "?") +
       " · ended: " + (outcome.reason || "?")));
     if (outcome.reason === "token_cap") {
@@ -231,9 +274,22 @@
         "This session reached its token budget, so the run stopped early. " +
         "The result above reflects only what ran."));
     }
-    (outcome.actions || []).forEach(function (action) {
+    // Consequential actions in full; lookups counted. A real model searches
+    // repeatedly, and listing every read-only call buries the one line that
+    // says what it actually did.
+    var actions = outcome.actions || [];
+    var consequential = actions.filter(function (a) { return a.privileged; });
+    var lookups = actions.length - consequential.length;
+    consequential.forEach(function (action) {
       box.appendChild(el("div", "mono", action.tool + " " + JSON.stringify(action.args)));
     });
+    if (!consequential.length) {
+      box.appendChild(el("div", "hint", "No privileged action was taken."));
+    }
+    if (lookups) {
+      box.appendChild(el("div", "hint", lookups + " read-only call" +
+        (lookups === 1 ? "" : "s") + " (searches and memory reads)"));
+    }
     if ((outcome.approval_requests || []).length) {
       box.appendChild(el("div", "hint",
         outcome.approval_requests.length + " action(s) awaiting human approval"));
@@ -257,8 +313,14 @@
     if (event.type === "memory_write" && event.detail) {
       card.appendChild(el("div", "hint", "tier: " + event.detail.tier));
     }
+    if (event.defense && armState[arm]) {
+      armState[arm].annotated.push(event.defense.id);
+      if (event.defense.action === "blocked" || event.defense.action === "quarantined") {
+        armState[arm].stopped.push(event.defense.id);
+      }
+    }
     renderDefense(card, event.defense);
-    if (event.type === "done") renderOutcome(card, event);
+    if (event.type === "done") renderOutcome(card, event, arm);
     trace.appendChild(card);
     return event;
   }
@@ -282,6 +344,17 @@
       params.push("d1=" + (f.d1 ? "1" : "0"));
       params.push("d2=" + (f.d2 ? "1" : "0"));
       params.push("d3=" + (f.d3 ? "1" : "0"));
+    }
+
+    if (stage === 1) {
+      var enabled = [];
+      if (arm === "defended") {
+        var f = defenseFlags();
+        if (f.d1) enabled.push("D1");
+        if (f.d2) enabled.push("D2");
+        if (f.d3) enabled.push("D3");
+      }
+      armState[arm] = { stopped: [], annotated: [], enabled: enabled };
     }
 
     var source = new EventSource("/api/run?" + params.join("&"));
