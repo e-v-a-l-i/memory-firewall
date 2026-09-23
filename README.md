@@ -228,6 +228,12 @@ which model serves live traffic.
 - **No authentication.** Anyone with the URL can run the demo. Out of scope by
   design.
 
+## Licence
+
+MIT — see [`LICENSE`](LICENSE). The synthetic corpus under `data/` and the
+attack fixtures under `scenarios/` are part of the same grant: they are
+invented SOC records, not anyone's real telemetry.
+
 ## Repository
 
 | Path | What it holds |
@@ -242,7 +248,8 @@ which model serves live traffic.
 | `skills/` | Skill definitions |
 | `data/` | Synthetic alerts, logs and tickets |
 | `replays/` | Recorded runs and the eval table |
-| `scripts/` | The eval harness |
+| `scripts/` | The eval harness and the deployed smoke test |
+| `POSTMORTEM.md` | What went wrong building it, and what found each defect |
 
 [`DECISIONS.md`](DECISIONS.md) records the tradeoffs and every defense bypass
 found in review. [`POSTMORTEM.md`](POSTMORTEM.md) is the retrospective: the
