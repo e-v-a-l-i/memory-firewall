@@ -1,0 +1,19 @@
+# Which record fields an attacker can influence.
+#
+# Anything not listed here defaults to `internal`. The split is per-field, not
+# per-document (D-007): one chunk of an otherwise trustworthy log line can be
+# attacker-controlled, which is exactly what makes S1 legible in the trace.
+default: internal
+
+attacker_controllable:
+  - user_agent     # set by whatever made the request
+  - url            # attacker picks the path and query
+  - referer
+  - dns_query      # attacker picks the label they resolve
+  - comment        # anyone with ticket access can write one
+  - filename       # attacker names the binary they drop
+  - body           # free text on a ticket
+
+# Fields that are asserted by our own collectors and are not attacker-settable:
+# id, ts, host, src_ip, dest_ip, dest_port, event_type, action, message, user,
+# severity, status, rule, summary, title, assignee, hostname, related_logs.

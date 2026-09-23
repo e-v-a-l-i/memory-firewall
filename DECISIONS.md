@@ -13,6 +13,24 @@ Key tradeoffs, recorded as they are made (§12). Format:
 - **Reason:** system `python3` on this machine is 3.9.6. §2 specifies 3.12, and
   `str | None` syntax in `app.py` already requires it. Pinning avoids a class of
   "works locally, fails on deploy" surprises.
+- **Amended at the M1 deploy:** Cloud Run's buildpack no longer offers 3.12. The
+  builder's Artifact Registry lists only 3.13.x and 3.14.x, and `.python-version:
+  3.12` failed the build outright. `.python-version` is now `3.13`; the local
+  venv stays on 3.12 because that is the newest interpreter installed on this
+  machine. The runtime split is a real (small) risk — the code targets 3.10+
+  syntax and the four pinned deps ship wheels for both — and it is the exact
+  thing D-001 set out to avoid. Closing it means installing 3.13 locally and
+  rebuilding the venv. Flagged for the human; deliberately not done mid-milestone.
+
+### D-002b First deploy landed at the top of M1
+- **Decision:** deployed `memory-firewall` to Cloud Run, `us-central1`,
+  `--max-instances 1`, `--allow-unauthenticated`, `MODE=mock`, default compute
+  service account.
+- **Result:** https://memory-firewall-366819802884.us-central1.run.app —
+  `/health` 200 `{"status":"ok","mode":"mock","version":"0.1.0"}`, `/` 200 HTML,
+  unknown route 404, and `/openapi.json` and `/static/*` both 404 in production,
+  confirming the M0 hardening survived the deploy.
+- **Cost:** two builds — the first failed on the 3.12 runtime (see D-001).
 
 ### D-002 First Cloud Run deploy moved to the top of M1
 - **Decision:** M0 closes on a green local `/health`; the first deploy is M1's
@@ -122,3 +140,80 @@ Key tradeoffs, recorded as they are made (§12). Format:
   `untrusted_in_context` keys from M1, unfilled until M2.
 - **Reason:** the UI and the tests read one shape, and M2 adds defenses without
   reshaping the trace.
+
+## M1 — data, retrieval, skills, memory, agent loop
+
+### D-011 Retrieval interleaves documents instead of concatenating them
+- **Decision:** `_retrieve_for_alert` orders each document's fields by
+  informativeness (summary, message, user_agent, url … then identifiers, then
+  bookkeeping) and round-robins across documents.
+- **Found by:** implementing S1. Per-field chunking means ALR-1001 alone emits
+  nine chunks, so a flat limit filled the context with timestamps and ports and
+  never reached `evt-00042` — the injection was not retrieved at all and the
+  scenario silently did nothing.
+- **Reason:** which record gets read should not be an accident of file order.
+
+### D-012 Unresolvable provenance fails closed
+- **Decision:** `store.chunk_trust` returns `attacker_controllable` for any
+  chunk id the corpus cannot resolve, rather than guessing from the field name.
+- **Found by:** review. The field-name fallback failed open on a trailing
+  space, a different case, an extra id segment, or any field with no trust_map
+  entry — and the fallback exists precisely for ids the DB does not know
+  (stale provenance surviving a rebuild, a hand-written fixture).
+- **Reason:** "provenance I cannot check" is the case the memory gate most
+  needs to catch. Fail closed on the path built for the unknown.
+
+### D-013 Provenance is tracked on the trace, not re-derived from it
+- **Decision:** `_Trace` accumulates every source id that reaches the model's
+  context — from retrieval and from recalled memory — and a memory write is
+  attributed to that set.
+- **Found by:** review, as a two-hop bypass of both D2 and D3. Recalled memory
+  reaches the prompt as plain text with no chunk and no trust label: an
+  attacker's claim entered memory from a poisoned chunk on run one, came back
+  out on run two with `untrusted_in_context` still False, and could be re-saved
+  attributed to nothing but that run's own clean retrievals. Untrusted content
+  in the prompt, both gates blind to it.
+- **Reason:** the flag has to describe what the model actually read, by
+  whatever route. Anything that renders into the prompt registers first.
+
+### D-014 The outcome records performed calls, not requested ones
+- **Decision:** `_execute_skill` reports whether it ran; the outcome's
+  `actions` and `alert_status` are updated only when it did. Every executed
+  call is recorded with a `privileged` flag rather than only privileged ones.
+- **Found by:** review, with an M2-shaped D3 stubbed in: the defense fired, the
+  trace said so, and the outcome still reported the attacker had won.
+- **Reason:** §10.2 asserts "blocked" by reading the outcome. Recording all
+  tool calls also makes S2's goal detectable at all — `save_memory` is
+  `read_only`, so a privileged-only list could never see it.
+
+### D-015 Attacker-chosen tool arguments degrade instead of raising
+- **Decision:** `search_logs`'s `limit` is parsed defensively and clamped.
+- **Found by:** review. The gullible model extracts arguments from the same
+  untrusted text that named the tool, so a payload containing "limit the scope
+  to this host" produced `limit="the"` and `int()` killed the run — no done
+  event, no defense evaluation, and in M3 a dead SSE stream.
+
+### D-016 `trust_level` is not sent to the model
+- **Decision:** `to_tool_schemas` omits it; the policy layer reads the level
+  from the loaded Skill.
+- **Reason:** the Messages API rejects unknown fields on a tool object (M3's
+  `VertexClient` would 400), and a privilege label the model can see is a
+  privilege label an injection can argue with.
+
+### Known limitations carried into M2
+- **IP search is a bag of digits.** FTS5's tokenizer splits `10.0.4.17` into
+  `10 0 4 17`, so `10.0.17.4` matches the same records. The host top-up in
+  `_retrieve_for_alert` uses this, so a larger corpus could pull
+  attacker-controlled content from unrelated hosts into context.
+- **Non-ASCII is dropped by the tokenizer**, so a homoglyph or IDN indicator is
+  unsearchable rather than erroring. This matters for the red-teamer's
+  confusable-character variants (S1d).
+- **Split-payload variants are retrieval-limited, not policy-limited.** The
+  red-teamer's S1g/S1h never get their second fragment into context: the host
+  top-up's five slots are taken by the alert's own internal chunks, which
+  contain the host IP literally and outrank a planted ticket comment. Both
+  fragments must reach context before D1's cross-chunk behaviour means
+  anything.
+- **`reset_db()` is a process-wide wipe.** The UI's reset button must call
+  `store.reset_session(conn, session_id)` instead, or one visitor's reset
+  destroys another's memory.
