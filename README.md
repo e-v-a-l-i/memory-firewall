@@ -186,4 +186,6 @@ which model serves live traffic.
 | `scripts/` | The eval harness |
 
 [`DECISIONS.md`](DECISIONS.md) records the tradeoffs and every defense bypass
-found in review. [`replays/eval.md`](replays/eval.md) holds the eval table.
+found in review. [`POSTMORTEM.md`](POSTMORTEM.md) is the retrospective: the
+eighteen defects, what found each one, and the five patterns behind them.
+[`replays/eval.md`](replays/eval.md) holds the eval table.
