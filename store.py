@@ -237,9 +237,16 @@ def build_db(path: str = ":memory:", data_dir: Path | str = DATA_DIR) -> sqlite3
     Rebuilding replaces the chunk corpus but never touches `memory`: sessions
     survive a rebuild, which is what makes S2's "persists across runs" real.
     """
-    # check_same_thread=False: FastAPI runs sync handlers on a threadpool,
-    # and a single-instance service shares one connection across them.
+    # check_same_thread=False: FastAPI runs sync handlers on a threadpool.
+    # Note this permits sharing but does not make sharing safe — see
+    # `app.get_db`, which hands every caller its own connection.
     conn = sqlite3.connect(path, check_same_thread=False)
+    if path != ":memory:":
+        # WAL lets readers and writers work concurrently instead of
+        # serialising behind a global lock. Without it, two side-by-side runs
+        # deadlock or drop writes.
+        conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(_SCHEMA)
 
     conn.execute("DELETE FROM chunks")

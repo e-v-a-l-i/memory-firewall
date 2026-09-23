@@ -225,3 +225,184 @@ class MockClient:
             if best is not None:
                 return best
         return None
+
+
+# =============================================================================
+# Live and recorded clients
+# =============================================================================
+
+import json
+import os
+from pathlib import Path
+
+REPLAYS_DIR = Path(__file__).resolve().parent / "replays"
+
+
+class ReplayMissing(Exception):
+    """No recorded run exists for this scenario, arm and stage."""
+
+
+class VertexClient:
+    """Claude through Vertex AI.
+
+    Close to a passthrough by design: `iter_scenario` already builds messages
+    in Anthropic block format and `to_tool_schemas` already emits tool
+    definitions the API accepts (D-016), so nothing is translated on the way
+    in and only the response is mapped on the way out.
+
+    The `sdk` seam exists so this is testable with no network and no
+    credentials — the whole suite runs offline (§11).
+    """
+
+    name = "vertex"
+
+    def __init__(self, *, project=None, region=None, model=None, timeout=45.0, sdk=None):
+        self._model = model or os.environ["MODEL_AGENT"]
+        if sdk is None:
+            # Imported here, not at module scope: importing `app` must stay
+            # side-effect free and must not pull in the SDK (D-005).
+            from anthropic import AnthropicVertex
+
+            sdk = AnthropicVertex(
+                project_id=project or os.environ["GCP_PROJECT"],
+                region=region or os.environ.get("VERTEX_REGION", "global"),
+                timeout=timeout,
+                # One attempt. §7's retry story is the replay fallback; an SDK
+                # that retries internally just delays it behind a timeout.
+                max_retries=1,
+            )
+        self._sdk = sdk
+
+    def complete(
+        self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int = 1024
+    ) -> Completion:
+        response = self._sdk.messages.create(
+            model=self._model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+
+        text_parts, tool_calls = [], []
+        for block in getattr(response, "content", None) or ():
+            kind = getattr(block, "type", None)
+            if kind == "text":
+                text_parts.append(getattr(block, "text", "") or "")
+            elif kind == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=getattr(block, "id", ""),
+                        name=getattr(block, "name", ""),
+                        input=dict(getattr(block, "input", None) or {}),
+                    )
+                )
+
+        usage = getattr(response, "usage", None)
+        return Completion(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            stop_reason=getattr(response, "stop_reason", "end_turn") or "end_turn",
+            usage={
+                "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+            },
+        )
+
+
+class ReplayClient:
+    """Serves a recorded run so the demo works with no model at all (§1).
+
+    A replay holds the model's **completions**, not the trace. Retrieval, D1's
+    per-run nonce and wrapping, D2's gate and D3's policy all execute for real
+    on every replayed run — only what the model said comes off disk. A frozen
+    trace would have made replay mode a video of the demo rather than the
+    demo, with the defense toggles inert.
+    """
+
+    name = "replay"
+
+    def __init__(self, scenario: str, arm: str = "undefended", stage: int = 1, dir=None):
+        directory = Path(dir) if dir is not None else REPLAYS_DIR
+        self.path = directory / f"{str(scenario).lower()}_{arm}_stage{stage}.json"
+        if not self.path.exists():
+            raise ReplayMissing(
+                f"no recorded run at {self.path.name}; record one with scripts/eval.py --record"
+            )
+        # Anything unreadable is "no usable recording", raised as the same
+        # error a missing file raises. Replay mode is what §1 promises works
+        # without a model, so a truncated write or a bad merge must degrade
+        # to a clean 404 rather than escaping as a parse error mid-request.
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                recording = json.load(fh)
+        except (ValueError, OSError) as exc:
+            raise ReplayMissing(f"{self.path.name} is not readable JSON: {exc}") from exc
+        if not isinstance(recording, dict):
+            raise ReplayMissing(
+                f"{self.path.name} is {type(recording).__name__}, expected an object"
+            )
+        completions = recording.get("completions")
+        if completions is not None and not isinstance(completions, list):
+            raise ReplayMissing(
+                f"{self.path.name} has a {type(completions).__name__} where its "
+                "completions list should be"
+            )
+        self.recording = recording
+        self._completions = list(completions or [])
+        self._cursor = 0
+
+    def complete(
+        self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int = 1024
+    ) -> Completion:
+        if self._cursor >= len(self._completions):
+            # Graceful end rather than an exception: a toggle combination the
+            # recording never saw must still reach `done`. A short run is a
+            # much better failure than a stream that dies mid-demo.
+            return Completion(
+                text="The recorded run ended here.",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage={"input_tokens": 0, "output_tokens": 0},
+            )
+        raw = self._completions[self._cursor]
+        self._cursor += 1
+        return Completion(
+            text=raw.get("text", ""),
+            tool_calls=[
+                ToolCall(id=tc.get("id", ""), name=tc.get("name", ""), input=dict(tc.get("input") or {}))
+                for tc in raw.get("tool_calls") or ()
+            ],
+            stop_reason=raw.get("stop_reason", "end_turn"),
+            usage={
+                "input_tokens": int((raw.get("usage") or {}).get("input_tokens", 0)),
+                "output_tokens": int((raw.get("usage") or {}).get("output_tokens", 0)),
+            },
+        )
+
+
+class FallbackClient:
+    """Primary model, with a recorded run as the safety net (§7).
+
+    Failover is mid-run, not per-run: if Vertex times out on turn three, the
+    remaining turns come from the recording and the stream continues. The
+    trace says so, so a viewer is never shown a replay while being told it is
+    live.
+    """
+
+    def __init__(self, primary, fallback):
+        self._primary = primary
+        self._fallback = fallback
+        self.fell_back = False
+
+    @property
+    def name(self) -> str:
+        return getattr(self._fallback if self.fell_back else self._primary, "name", "unknown")
+
+    def complete(self, **kwargs) -> Completion:
+        if not self.fell_back:
+            try:
+                return self._primary.complete(**kwargs)
+            except Exception:  # noqa: BLE001 - any live failure falls back
+                self.fell_back = True
+        return self._fallback.complete(**kwargs)

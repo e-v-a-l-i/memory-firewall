@@ -5,42 +5,437 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Memory Firewall</title>
 <style>
-  :root { color-scheme: light dark; --fg: #16181d; --muted: #5c6370; --bg: #fbfbfa; --line: #e3e3e0; }
+  :root {
+    color-scheme: light dark;
+    --fg: #16181d; --muted: #5c6370; --bg: #fbfbfa; --card: #fff;
+    --line: #e3e3e0; --accent: #2d5bd7; --danger: #b3261e; --ok: #1a7f4b;
+    --warn: #8a5a00; --untrusted-bg: #fdf1f0;
+  }
   @media (prefers-color-scheme: dark) {
-    :root { --fg: #ececec; --muted: #9a9a9a; --bg: #1b1b19; --line: #34342f; }
+    :root {
+      --fg: #ececec; --muted: #9a9a9a; --bg: #1b1b19; --card: #232321;
+      --line: #34342f; --accent: #7aa2f7; --danger: #f2777a; --ok: #7fcf9f;
+      --warn: #d4a017; --untrusted-bg: #2e2220;
+    }
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 48px 16px; background: var(--bg); color: var(--fg);
-    font: 16px/1.55 ui-sans-serif, -apple-system, system-ui, sans-serif;
+    margin: 0; padding: 20px 16px 48px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
   }
-  main { max-width: 34rem; margin: 0 auto; }
-  h1 { font-size: 1.5rem; margin: 0 0 .5rem; letter-spacing: -0.01em; }
-  p { color: var(--muted); margin: 0 0 1rem; }
-  ol { color: var(--muted); padding-left: 1.2rem; margin: 0; }
-  li { margin: .35rem 0; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .875em; }
-  .status { border-top: 1px solid var(--line); margin-top: 1.5rem; padding-top: 1rem; font-size: .875rem; }
+  main { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: .95rem; margin: 0; }
+  p { margin: .4rem 0; color: var(--muted); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .spread { justify-content: space-between; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 14px; }
+  .badge {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; color: var(--muted);
+  }
+  button, select {
+    font: inherit; color: inherit; background: var(--card);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px;
+    max-width: 100%;
+  }
+  /* The scenario names are long; without min-width:0 the select refuses to
+     shrink below its content and pushes the page wider than the phone. */
+  #scenario { flex: 1 1 14rem; min-width: 0; text-overflow: ellipsis; }
+  .row > * { min-width: 0; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  button:disabled { opacity: .5; cursor: default; }
+  .controls { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .toggles { gap: 14px; }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .hint { font-size: .8rem; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  .col { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  .col-head { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 8px; }
+  .trace { display: flex; flex-direction: column; gap: 7px; }
+  .event { border: 1px solid var(--line); border-left-width: 3px; border-radius: 7px; padding: 7px 9px; }
+  .event .kind { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .event .title { overflow-wrap: anywhere; }
+  .event[data-type="tool_call"] { border-left-color: var(--warn); }
+  .event[data-type="blocked"] { border-left-color: var(--ok); }
+  .event[data-type="memory_write"] { border-left-color: var(--accent); }
+  .event[data-type="error"] { border-left-color: var(--danger); }
+  .chunk {
+    border-left: 3px solid var(--line); padding: 4px 8px; margin: 5px 0;
+    background: var(--bg); border-radius: 0 5px 5px 0;
+  }
+  .chunk.untrusted { border-left-color: var(--danger); background: var(--untrusted-bg); }
+  .pill {
+    font-size: .68rem; border-radius: 999px; padding: 1px 7px;
+    border: 1px solid var(--danger); color: var(--danger);
+  }
+  .defense {
+    margin-top: 6px; border: 1px dashed var(--ok); border-radius: 6px;
+    padding: 5px 8px; font-size: .84rem;
+  }
+  .outcome { margin-top: 8px; border-radius: 8px; padding: 9px; border: 1px solid var(--line); }
+  .outcome.bad { border-color: var(--danger); }
+  .outcome.good { border-color: var(--ok); }
+  .verdict { font-weight: 600; }
+  .verdict.bad { color: var(--danger); }
+  .verdict.good { color: var(--ok); }
+  .panel { margin-top: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .record { border: 1px solid var(--line); border-radius: 7px; padding: 8px; margin: 7px 0; }
+  .empty { color: var(--muted); font-size: .86rem; }
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr; }
+    body { padding: 14px 12px 36px; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <h1>Memory Firewall</h1>
-  <p>
-    Prompt-injection attacks against a SOC triage agent that uses retrieval,
-    memory and skills — and the layered defenses that stop them. Run each
-    attack with defenses off, then on, and see where the injection entered
-    and which defense caught it.
-  </p>
-  <ol>
-    <li>S1 — retrieval hijack: an instruction hidden in a log's user-agent</li>
-    <li>S2 — memory poisoning: a ticket comment that plants a false fact</li>
-    <li>S3 — privileged skill abuse: an injected "remediation step"</li>
-  </ol>
-  <p class="status">
-    Skeleton only — the scenario UI arrives in M3.
-    Liveness: <a href="/health"><code>/health</code></a>
-  </p>
+  <header>
+    <div class="row spread">
+      <h1>Memory Firewall</h1>
+      <div class="row">
+        <span class="badge" id="mode-badge">mode …</span>
+        <select id="mode-select" aria-label="Run mode">
+          <option value="mock">mock</option>
+          <option value="replay">replay</option>
+          <option value="live">live</option>
+        </select>
+        <button id="reset">Reset session</button>
+      </div>
+    </div>
+    <p>
+      Prompt injection against a SOC triage agent, run twice side by side.
+      The left column has no defenses; the right has the ones you pick.
+    </p>
+  </header>
+
+  <section class="controls">
+    <div class="row spread">
+      <div class="row">
+        <select id="scenario" aria-label="Scenario"></select>
+        <button class="primary" id="run">Run both</button>
+      </div>
+      <div class="row toggles" id="toggles">
+        <span class="hint">Defenses for the right column:</span>
+        <label class="toggle"><input type="checkbox" id="d1" checked> D1 spotlighting</label>
+        <label class="toggle"><input type="checkbox" id="d2" checked> D2 memory gate</label>
+        <label class="toggle"><input type="checkbox" id="d3" checked> D3 skill policy</label>
+      </div>
+    </div>
+    <p class="hint" id="scenario-note"></p>
+    <p class="hint">
+      The eval in <code>replays/eval.md</code> measures D1 alone, because D2 and D3
+      are deterministic code already proven in tests — only D1 depends on how the
+      model behaves.
+    </p>
+  </section>
+
+  <div class="grid">
+    <section class="col">
+      <div class="col-head">
+        <h2>Undefended</h2>
+        <div class="hint" id="inj-undefended"></div>
+      </div>
+      <div class="trace" id="trace-undefended"><p class="empty">Pick a scenario and press Run.</p></div>
+    </section>
+    <section class="col">
+      <div class="col-head">
+        <h2>Defended <span class="mono" id="defended-label"></span></h2>
+        <div class="hint" id="inj-defended"></div>
+      </div>
+      <div class="trace" id="trace-defended"><p class="empty">Same attack, defenses on.</p></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="row spread">
+      <h2>Quarantine</h2>
+      <span class="hint">Facts held for human review — nothing here is recalled by a later run.</span>
+    </div>
+    <div id="quarantine"><p class="empty">Nothing saved yet.</p></div>
+  </section>
 </main>
+
+<script>
+(function () {
+  "use strict";
+
+  var EVENT_TYPES = ["run_started", "retrieval", "model", "tool_call", "tool_result",
+                     "memory_write", "blocked", "done", "error"];
+  var scenarios = {};
+  var streams = [];
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+  function byId(id) { return document.getElementById(id); }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function defenseFlags() {
+    return { d1: byId("d1").checked, d2: byId("d2").checked, d3: byId("d3").checked };
+  }
+
+  function defendedLabel() {
+    var f = defenseFlags();
+    var on = [];
+    if (f.d1) on.push("D1");
+    if (f.d2) on.push("D2");
+    if (f.d3) on.push("D3");
+    return on.length ? on.join(" ") : "no defenses";
+  }
+
+  // --- rendering ----------------------------------------------------------
+
+  function renderChunks(container, chunks, injectionLocation) {
+    chunks.forEach(function (chunk) {
+      var untrusted = chunk.trust === "attacker_controllable";
+      var box = el("div", "chunk" + (untrusted ? " untrusted" : ""));
+      var head = el("div", "row");
+      head.appendChild(el("span", "mono", chunk.id));
+      if (untrusted) head.appendChild(el("span", "pill", "attacker-controllable"));
+      if (chunk.id === injectionLocation) head.appendChild(el("span", "pill", "injection source"));
+      box.appendChild(head);
+      box.appendChild(el("div", "hint", chunk.preview || ""));
+      container.appendChild(box);
+    });
+  }
+
+  function renderDefense(container, defense) {
+    if (!defense) return;
+    var box = el("div", "defense");
+    box.appendChild(el("div", null, defense.id + " — " + defense.name + " — " + defense.action));
+    if (defense.reason) box.appendChild(el("div", "hint", defense.reason));
+    var triggers = defense.trigger_chunks || [];
+    if (triggers.length) {
+      box.appendChild(el("div", "hint mono", "triggered by: " + triggers.join(", ")));
+    }
+    container.appendChild(box);
+  }
+
+  function renderOutcome(container, event) {
+    var outcome = event.outcome || {};
+    var achieved = outcome.attacker_goal_achieved === true;
+    var box = el("div", "outcome " + (achieved ? "bad" : "good"));
+    var verdict = el("div", "verdict " + (achieved ? "bad" : "good"),
+      achieved ? "Attacker goal achieved" : "Attacker goal not achieved");
+    box.appendChild(verdict);
+    box.appendChild(el("div", "hint", "alert " + (outcome.alert_status || "?") +
+      " · ended: " + (outcome.reason || "?")));
+    (outcome.actions || []).forEach(function (action) {
+      box.appendChild(el("div", "mono", action.tool + " " + JSON.stringify(action.args)));
+    });
+    if ((outcome.approval_requests || []).length) {
+      box.appendChild(el("div", "hint",
+        outcome.approval_requests.length + " action(s) awaiting human approval"));
+    }
+    container.appendChild(box);
+  }
+
+  function renderEvent(arm, event, injectionLocation) {
+    var trace = byId("trace-" + arm);
+    var card = el("div", "event");
+    card.setAttribute("data-type", event.type);
+    card.appendChild(el("div", "kind", event.type));
+    card.appendChild(el("div", "title", event.title || ""));
+
+    if (event.type === "retrieval" && (event.chunks || []).length) {
+      renderChunks(card, event.chunks, injectionLocation);
+    }
+    if (event.type === "model" && event.detail && event.detail.fallback) {
+      card.appendChild(el("div", "hint", "live call failed — this turn came from the recording"));
+    }
+    if (event.type === "memory_write" && event.detail) {
+      card.appendChild(el("div", "hint", "tier: " + event.detail.tier));
+    }
+    renderDefense(card, event.defense);
+    if (event.type === "done") renderOutcome(card, event);
+    trace.appendChild(card);
+    return event;
+  }
+
+  // --- running ------------------------------------------------------------
+
+  function closeStreams() {
+    streams.forEach(function (s) { try { s.close(); } catch (e) {} });
+    streams = [];
+  }
+
+  function startRun(arm, scenarioId, stage) {
+    var scenario = scenarios[scenarioId] || {};
+    var injection = (scenario.injection || {}).location || "";
+    var params = ["scenario=" + encodeURIComponent(scenarioId), "arm=" + arm,
+                  "stage=" + stage, "mode=" + encodeURIComponent(byId("mode-select").value)];
+    if (arm === "defended") {
+      var f = defenseFlags();
+      // Only the defended arm carries toggles. The server forces the
+      // undefended arm off regardless, so the baseline cannot be altered.
+      params.push("d1=" + (f.d1 ? "1" : "0"));
+      params.push("d2=" + (f.d2 ? "1" : "0"));
+      params.push("d3=" + (f.d3 ? "1" : "0"));
+    }
+
+    var source = new EventSource("/api/run?" + params.join("&"));
+    streams.push(source);
+
+    EVENT_TYPES.forEach(function (type) {
+      // Named SSE events do not fire onmessage, so every type needs its own
+      // listener. A missing one means events are silently dropped.
+      source.addEventListener(type, function (message) {
+        var event;
+        try { event = JSON.parse(message.data); } catch (err) { return; }
+        renderEvent(arm, event, injection);
+        if (event.type === "done") {
+          source.close();
+          if (stage === 1 && (scenario.stages || 1) > 1) {
+            var note = el("p", "hint", "Stage 2: the next alert on the same host.");
+            byId("trace-" + arm).appendChild(note);
+            startRun(arm, scenarioId, 2);
+          } else {
+            loadQuarantine();
+          }
+        }
+      });
+    });
+
+    source.onerror = function () {
+      source.close();
+      // Without this a run that cannot start leaves a permanently blank
+      // column and no indication that anything went wrong.
+      var trace = byId("trace-" + arm);
+      if (!trace.querySelector(".event")) {
+        trace.appendChild(el("p", "empty", "The run could not start — check the mode."));
+      }
+    };
+  }
+
+  function run() {
+    closeStreams();
+    var scenarioId = byId("scenario").value;
+    var scenario = scenarios[scenarioId] || {};
+    byId("defended-label").textContent = defendedLabel();
+    ["undefended", "defended"].forEach(function (arm) {
+      clear(byId("trace-" + arm));
+      byId("inj-" + arm).textContent = "Injection: " + ((scenario.injection || {}).location || "—");
+    });
+    startRun("undefended", scenarioId, 1);
+    startRun("defended", scenarioId, 1);
+  }
+
+  // --- quarantine ---------------------------------------------------------
+
+  function decide(recordId, arm, action) {
+    // The session is never sent: the server derives it from the cookie, so a
+    // guessed record id cannot reach another visitor's memory.
+    fetch("/api/memory/" + encodeURIComponent(recordId) + "/" + action, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ arm: arm })
+    }).then(loadQuarantine);
+  }
+
+  function renderRecords(container, arm, records) {
+    records.forEach(function (record) {
+      var box = el("div", "record");
+      box.appendChild(el("div", null, record.content));
+      box.appendChild(el("div", "hint", arm + " · " + record.tier + " · " + record.status +
+        " · trust: " + record.trust));
+      if ((record.provenance || []).length) {
+        box.appendChild(el("div", "hint mono", "from: " + record.provenance.slice(0, 3).join(", ")));
+      }
+      if (record.tier === "quarantine" && record.status === "active") {
+        var actions = el("div", "row");
+        var approve = el("button", null, "Approve");
+        approve.onclick = function () { decide(record.id, arm, "approve"); };
+        var reject = el("button", null, "Reject");
+        reject.onclick = function () { decide(record.id, arm, "reject"); };
+        actions.appendChild(approve);
+        actions.appendChild(reject);
+        box.appendChild(actions);
+      }
+      container.appendChild(box);
+    });
+  }
+
+  function loadQuarantine() {
+    fetch("/api/memory", { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        var panel = byId("quarantine");
+        clear(panel);
+        var total = 0;
+        ["undefended", "defended"].forEach(function (arm) {
+          var records = body[arm] || [];
+          total += records.length;
+          renderRecords(panel, arm, records);
+        });
+        if (!total) panel.appendChild(el("p", "empty", "Nothing saved yet."));
+      });
+  }
+
+  // --- boot ---------------------------------------------------------------
+
+  function boot() {
+    fetch("/api/config", { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (config) {
+        byId("mode-badge").textContent = "mode: " + config.mode;
+        byId("mode-select").value = config.mode;
+        var liveOption = byId("mode-select").querySelector('option[value="live"]');
+        if (liveOption && !config.live_available) {
+          liveOption.disabled = true;
+          liveOption.textContent = "live (unavailable)";
+        }
+      });
+
+    fetch("/api/scenarios", { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (list) {
+        var select = byId("scenario");
+        clear(select);
+        list.forEach(function (scenario) {
+          scenarios[scenario.id] = scenario;
+          var option = el("option", null, scenario.id + " — " + scenario.name);
+          option.value = scenario.id;
+          select.appendChild(option);
+        });
+        showNote();
+      });
+
+    byId("scenario").onchange = showNote;
+    byId("run").onclick = run;
+    byId("reset").onclick = function () {
+      closeStreams();
+      fetch("/api/reset", { method: "POST", credentials: "same-origin" }).then(function () {
+        ["undefended", "defended"].forEach(function (arm) {
+          clear(byId("trace-" + arm));
+          byId("trace-" + arm).appendChild(el("p", "empty", "Cleared."));
+        });
+        loadQuarantine();
+      });
+    };
+    ["d1", "d2", "d3"].forEach(function (id) {
+      byId(id).onchange = function () { byId("defended-label").textContent = defendedLabel(); };
+    });
+    byId("defended-label").textContent = defendedLabel();
+    loadQuarantine();
+  }
+
+  function showNote() {
+    var scenario = scenarios[byId("scenario").value];
+    if (!scenario) return;
+    byId("scenario-note").textContent =
+      "Primary defense " + scenario.primary_defense + " · injection in " +
+      (scenario.injection || {}).location;
+  }
+
+  boot();
+})();
+</script>
 </body>
 </html>

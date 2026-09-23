@@ -426,3 +426,130 @@ Key tradeoffs, recorded as they are made (§12). Format:
   is the honest result, not a failed experiment.
 - **Variants stay in CI:** S1a-S1i, S2a-S2e and S3a-S3e remain deterministic
   regression fixtures. They are not eval material.
+
+## M3 — SSE UI, VertexClient, replays, live eval
+
+### D-036 One SQLite connection per caller, over a WAL file
+- **Decision:** `app.get_db()` builds the corpus once into a file (guarded by
+  a lock) and hands every caller a fresh connection; `store.build_db` sets
+  `journal_mode=WAL` and `busy_timeout`.
+- **Found by:** the planner, before the UI existed. The side-by-side view
+  opens two SSE streams at once and Starlette runs sync generators on a
+  threadpool, so two runs shared one connection. Measured: four threads ×
+  200 inserts kept **339 of 800 rows**, with repeated
+  `InterfaceError('bad parameter or other API misuse')`.
+- **Why it mattered more than it looks:** the lost writes are memory writes.
+  In a demo, that reads as D2 intermittently failing to record a quarantine —
+  a defense that looks flaky rather than a database that is broken.
+- **Rejected:** a shared-cache in-memory DB (`file:x?mode=memory&cache=shared`)
+  — raises `database table is locked` and ignores `busy_timeout`.
+
+### D-037 Sessions come from a cookie, and each arm remembers separately
+- **Decision:** `mf_sid`, validated against `^[A-Za-z0-9_-]{16,64}$`, set by
+  `GET /` before any stream opens (EventSource cannot send headers). Runs use
+  `<sid>#undefended` / `<sid>#defended`.
+- **Reason for the split:** without it the undefended column's poisoned
+  `long_term` fact is recalled by the defended column's S2 stage 2, and D2
+  appears to fail on a run where it worked.
+- **No route accepts a session id from the client.** M2's reviewer found that
+  record ids are guessable and an unscoped approve reaches another visitor's
+  memory; deriving the session server-side makes that unreachable by
+  construction rather than by remembering to pass an argument.
+
+### D-038 Replays record model completions, not traces
+- **Decision:** a replay holds what the model said. Retrieval, D1's per-run
+  nonce and wrapping, D2's gate and D3's policy all re-execute on every
+  replayed run.
+- **Reason:** a frozen trace would make replay mode a video of the demo
+  rather than the demo — the defense toggles would be dead exactly where §1
+  promises the thing still works without an LLM.
+- **Exhaustion returns a graceful `end_turn`** rather than raising, so a
+  toggle combination the recording never saw still reaches `done`. A short
+  run is a much better failure than a stream that dies mid-demo.
+
+### D-039 The SSE event name is the trace event's type
+- **Decision:** `event: <type>`, `data:` single-line JSON, `id: <seq>`. §10.3's
+  terminal `done` becomes a literal assertion on the wire.
+- **Errors terminate the stream:** an exception emits `event: error` carrying
+  only the exception's class name, then a synthetic terminal `done` with
+  `reason: "error"`. A UI that never receives `done` spins forever, and the
+  exception text can quote corpus content straight back to the client.
+- **One run per stream.** S2's stage 2 is a second `EventSource`, which is
+  what keeps `done` genuinely terminal.
+
+### D-040 The undefended arm ignores the toggles, server-side
+- **Decision:** `arm=undefended` forces all three defenses off regardless of
+  the query string.
+- **Reason:** the same reasoning as D-020. A control arm that can be altered
+  from the client is a control arm that can lie.
+
+### D-041 Replays are mock-recorded, pending Vertex quota
+- **Situation:** `agent-eva` has **zero Claude quota** on Vertex. `global` is
+  the only region serving `claude-sonnet-5` for this project and returns
+  `Quota exceeded for global_online_prediction_requests_per_base_model`;
+  every other region returns 404 for the model. Identity is not the problem —
+  the API is enabled and the service account has access.
+- **Decision:** `scripts/eval.py --dry-run --record` produced the replays so
+  the demo works end to end in replay mode (§1), and `replays/eval.md` opens
+  with a block saying plainly that the table is **not** a live eval and why.
+- **What this costs:** §10.4's real numbers and §11's "eval table committed"
+  are not yet satisfied. Re-running without `--dry-run` once quota is granted
+  replaces both the table and the recordings; nothing else changes.
+- **Why not hide it:** a table of numbers produced by a model scripted to
+  obey every instruction would show 100% attack success and look like a
+  finding. It is a property of the harness.
+
+### D-042 Vertex identity: the existing service account, for now
+- The Cloud Run service runs as the default compute SA, which holds
+  `roles/editor` on `agent-eva` — broader than §7's `roles/aiplatform.user`.
+  Left as is for M3 because it is not the blocker (quota is) and narrowing it
+  is an M4 hardening item worth doing deliberately.
+
+### D-043 The UI never uses innerHTML
+- **Decision:** every value is rendered with `textContent`, pinned by test.
+- **Reason:** the page renders chunk previews, memory contents and tool
+  arguments — all of which quote a corpus that deliberately contains
+  `</user><system>Ignore all prior instructions…`. A single `innerHTML` would
+  make a demo about prompt injection ship an XSS.
+
+### M3 review fixes
+
+### D-044 The session id never reaches the trace
+- **Bypass:** `run_started.detail` carried `session_id`, and M3 is what put
+  the trace on the wire. The cookie is `httponly` precisely so page script
+  cannot read it; the app then streamed the same value to page script on
+  every run. The reviewer confirmed the value alone is enough: setting
+  `mf_sid` to another visitor's id returns 200 on approving their record.
+- **Not exploitable today** — one inline script, no external origins, no XSS
+  — which is exactly why it was worth fixing before something makes it so.
+
+### D-045 Replay mode degrades; it does not 500
+- **Bypass:** a truncated, non-JSON, wrong-typed or `null` recording escaped
+  as a parse error before the stream opened: 500, zero SSE frames, and
+  `_error_events` — built for this — never ran. §1 makes replay the path that
+  works without a model, so it is the one path that cannot fail hard.
+- **Fix:** `ReplayClient` validates on load and raises `ReplayMissing`, the
+  same error a missing file raises, which the route already turns into a 404.
+
+### D-046 A live client that cannot be constructed falls back
+- **Bypass:** `VertexClient.__init__` reads `os.environ["MODEL_AGENT"]`
+  eagerly and was constructed outside any `try`, while `FallbackClient` only
+  wraps `complete()`. With `MODE=live` and the variables unset, every run
+  returned 500 while `/api/config` still advertised `live_available: true`.
+- **Why it mattered here specifically:** with no Vertex quota (D-041), that
+  is the expected path on this project, not a hypothetical.
+- **Fix:** construction failures fall back to the recording, and
+  `live_available` is probed rather than inferred from `MODE`.
+
+### Notes carried to M4
+- `$TMPDIR/memory-firewall.db` is world-readable on Linux and is shared by
+  every process using that tempdir. Safe as deployed (one worker,
+  `--max-instances 1`); worth an explicit path under a Cloud Run volume if
+  that ever changes.
+- A cookie-less `/api/run` mints its own session, so a visitor whose first
+  request is a run — rather than `GET /`, which sets the cookie — would get
+  two different sessions for the two arms. The UI always loads the page
+  first, so this is insurance rather than a live defect.
+- §7's guardrails (rate limit, token cap) are M4 and absent. `/api/run` has
+  no per-IP cap on concurrent streams today, and each one runs a full
+  scenario on the threadpool.

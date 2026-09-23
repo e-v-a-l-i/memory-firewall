@@ -5,6 +5,7 @@ first M2 implementation. They are the difference between a defense that
 works and a defense that reports that it worked.
 """
 import concurrent.futures
+import json
 
 import pytest
 
@@ -397,3 +398,120 @@ def test_events_emitted_inside_a_skill_are_streamed_too():
             # Reached the consumer before the run ended.
             assert "done" not in seen
     assert "memory_write" in seen
+
+
+# =============================================================================
+# M3 review findings
+# =============================================================================
+
+
+def test_the_trace_never_carries_the_session_id():
+    """The session cookie is httponly so page JS cannot read it. Streaming
+    the same value in `run_started` handed it straight back — and it is
+    sufficient on its own to approve another visitor's quarantined memory.
+    """
+    conn = store.build_db(":memory:")
+    secret = "SuperSecretSessionValue123"
+    events = app.run_scenario(
+        "S1", clients.MockClient(gullible=True), defenses=NO_DEFENSES,
+        session_id=secret, conn=conn,
+    )
+    blob = json.dumps(events)
+    assert secret not in blob, "the session id reached the trace"
+    assert "session_id" not in events[0]["detail"]
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    ['{"completions": [{"text": "hi"', "<html>nope</html>", '{"completions": 3}', "null"],
+    ids=["truncated", "not-json", "wrong-type", "null"],
+)
+def test_a_corrupt_recording_is_a_clean_404_not_a_500(tmp_path, corrupt):
+    """§1 makes replay mode the path that works without a model, so it is the
+    one path that must not 500. A truncated write or a bad merge produces
+    exactly these files."""
+    from fastapi.testclient import TestClient
+
+    replays = tmp_path / "replays"
+    replays.mkdir()
+    (replays / "s1_undefended_stage1.json").write_text(corrupt)
+
+    import clients as clients_module
+
+    original = clients_module.REPLAYS_DIR
+    clients_module.REPLAYS_DIR = replays
+    try:
+        client = TestClient(app.app)
+        r = client.get("/api/run", params={"scenario": "S1", "arm": "undefended",
+                                           "stage": 1, "mode": "replay"})
+        assert r.status_code == 404, f"expected a clean 404, got {r.status_code}"
+        assert "event:" not in r.text
+    finally:
+        clients_module.REPLAYS_DIR = original
+
+
+def test_live_mode_without_credentials_degrades_instead_of_500ing(monkeypatch):
+    """§7 asks for automatic fallback when a live call fails. A client that
+    cannot even be constructed is the same outcome for the viewer — and on
+    this project it is the expected one, since Vertex has no Claude quota.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("MODE", "live")
+    monkeypatch.delenv("MODEL_AGENT", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+
+    client = TestClient(app.app)
+    r = client.get("/api/run", params={"scenario": "S1", "arm": "undefended",
+                                       "stage": 1, "mode": "live"})
+    assert r.status_code == 200
+    assert "event: done" in r.text
+
+    config = client.get("/api/config").json()
+    assert config["live_available"] is False, (
+        "the UI must not offer a mode whose every run would fail"
+    )
+
+
+def test_stream_opens_with_a_keepalive_comment():
+    """The comment flushes headers so the browser's onopen fires before
+    retrieval, and stops an intermediary buffering the stream. The frame
+    parser skips comments, so deleting it would break both with a green
+    suite."""
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app.app)
+    r = client.get("/api/run", params={"scenario": "S1", "arm": "undefended",
+                                       "stage": 1, "mode": "mock"})
+    assert r.text.startswith(": "), f"stream did not open with a comment: {r.text[:40]!r}"
+
+
+def test_an_abandoned_stream_releases_its_connection():
+    """Every run opens a connection and closes it in a `finally`. If a client
+    disconnects mid-stream the generator is closed rather than exhausted, and
+    that path has to release too — a leak here only shows up under the
+    repeated runs of a live demo."""
+    import gc
+
+    conn = app.get_db()
+    try:
+        before = len(gc.get_objects())
+    finally:
+        conn.close()
+
+    for _ in range(5):
+        gen = app.iter_scenario(
+            "S1", clients.MockClient(gullible=True), defenses=NO_DEFENSES,
+            session_id="abandon", conn=store.build_db(":memory:"),
+        )
+        next(gen)
+        next(gen)
+        gen.close()  # what an aborted SSE stream does
+
+    gc.collect()
+    suspended = [
+        obj for obj in gc.get_objects()
+        if hasattr(obj, "gi_frame") and obj.gi_frame is not None
+        and getattr(obj.gi_code, "co_name", "") == "iter_scenario"
+    ]
+    assert not suspended, f"{len(suspended)} abandoned run generator(s) still suspended"

@@ -77,6 +77,30 @@ def s1_scenario():
         return yaml.safe_load(fh)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _tmp_db_path(tmp_path_factory):
+    """Point the app's database at a throwaway path for the whole run.
+
+    Without this the suite uses `$TMPDIR/memory-firewall.db` — the same file a
+    local dev server is holding open — and the autouse reset below unlinks it
+    underneath that server. The server keeps writing to the deleted inode and
+    nothing it writes is visible to any new connection: a split brain with no
+    error anywhere.
+    """
+    import os
+
+    import app as app_module
+
+    previous = os.environ.get("DB_PATH")
+    os.environ["DB_PATH"] = str(tmp_path_factory.mktemp("db") / "memory-firewall.db")
+    app_module.reset_db()
+    yield
+    if previous is None:
+        os.environ.pop("DB_PATH", None)
+    else:
+        os.environ["DB_PATH"] = previous
+
+
 @pytest.fixture(autouse=True)
 def _isolate_app_db():
     """Drop `app`'s cached DB around every test.

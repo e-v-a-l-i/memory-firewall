@@ -20,3 +20,5 @@ requirements-dev.txt
 *.pem
 *key*.json
 *credentials*.json
+scripts/
+.claude/launch.json
