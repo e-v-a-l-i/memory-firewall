@@ -249,9 +249,11 @@ invented SOC records, not anyone's real telemetry.
 | `data/` | Synthetic alerts, logs and tickets |
 | `replays/` | Recorded runs and the eval table |
 | `scripts/` | The eval harness and the deployed smoke test |
+| `RATIONALE.md` | The design argument, decisions and limits |
 | `POSTMORTEM.md` | What went wrong building it, and what found each defect |
 
-[`DECISIONS.md`](DECISIONS.md) records the tradeoffs and every defense bypass
+[`RATIONALE.md`](RATIONALE.md) explains the design and its tradeoffs in one
+read. [`DECISIONS.md`](DECISIONS.md) records the tradeoffs and every defense bypass
 found in review. [`POSTMORTEM.md`](POSTMORTEM.md) is the retrospective: the
 eighteen defects, what found each one, and the five patterns behind them.
 [`replays/eval.md`](replays/eval.md) holds the eval table.
