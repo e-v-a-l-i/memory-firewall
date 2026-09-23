@@ -102,6 +102,48 @@ stay live with no model at all.
 | `TRUSTED_PROXY_HOPS` | `0` | Proxy entries appended *after* the client address in `X-Forwarded-For`. `0` is correct for bare Cloud Run; `1` behind an external load balancer. |
 | `DB_PATH` | a private temp dir | SQLite file holding the corpus and memory. |
 
+## Use it from your own agent (MCP)
+
+The demo attacks an agent we control. `mcp_server.py` exposes the same corpus,
+the same skills and the same three defenses over MCP, so the agent under
+attack is **your** client — and the defenses run on this side of the boundary
+whatever that client decides.
+
+That is the argument for putting a trust policy in an MCP server rather than
+in a prompt. A model can be talked out of an instruction. It cannot be talked
+out of a tool that refuses to execute.
+
+```bash
+.venv/bin/python mcp_server.py                    # all defenses on
+MF_DEFENSES=none .venv/bin/python mcp_server.py   # undefended, to watch them land
+MF_DEFENSES=D1,D3 .venv/bin/python mcp_server.py  # pick and choose
+```
+
+Claude Desktop or Claude Code:
+
+```json
+{"mcpServers": {"injection-firewall": {
+  "command": "/absolute/path/to/.venv/bin/python",
+  "args": ["/absolute/path/to/mcp_server.py"]}}}
+```
+
+Then ask your client to triage `ALR-1001`. Tools: `list_alerts`, `open_alert`,
+`search_logs`, `recall_memory`, `save_memory`, `close_alert`, `unisolate_host`,
+and `firewall_status` — which reports what the firewall has seen, what it
+refused and why.
+
+Undefended, the run ends `Alert ALR-1001 closed as benign.` Defended, the same
+call comes back:
+
+```
+REFUSED by policy (D3): close_alert is a privileged action and
+attacker-controllable content is in this session's context
+(log:evt-00042:user_agent). A human must approve this action.
+```
+
+The defenses are the same functions the web demo uses (`defenses.py`), not a
+second implementation — a test asserts they are the same objects.
+
 ## Run it locally
 
 ```bash
@@ -190,7 +232,9 @@ which model serves live traffic.
 
 | Path | What it holds |
 |---|---|
-| `app.py` | Agent loop, defenses, API, SSE |
+| `app.py` | Agent loop, API, SSE |
+| `defenses.py` | D1, D2 and D3 — pure functions, shared by both surfaces |
+| `mcp_server.py` | The same toolset and defenses over MCP |
 | `clients.py` | Model clients: Vertex, replay, mock, fallback |
 | `store.py` | FTS5 retrieval and memory tiers |
 | `skills.py` | Skill loader and `trust_level` enforcement |

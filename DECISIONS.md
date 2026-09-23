@@ -908,3 +908,39 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
 - **Decision:** `tests/test_data_integrity.py` asserts ids are unique within
   and across the data files, that every `related_logs` / `related_tickets`
   reference resolves, and that every scenario points at an alert that exists.
+
+### D-069 The defenses moved into their own module
+- **Decision:** `defenses.py` holds D1's tagging and stripping, D2's tier
+  decision and D3's policy as pure functions. `app.py` imports them under its
+  old private names so nothing else moved; `mcp_server.py` imports them
+  directly.
+- **Reason:** the MCP server has to enforce the same rules, and a second copy
+  of a defense is a second thing to get wrong. A test asserts the two surfaces
+  hold the *same function objects*, not merely equivalent code — and it earned
+  its keep immediately, catching a `git checkout` that silently restored
+  `app.py`'s local copies while `defenses.py` still existed.
+- **Alert-centric retrieval moved to `store.py` for the same reason.** It is
+  the step that puts an injection in front of a model: the alert names related
+  records, those get read, and one of their fields was written by whoever
+  generated the traffic. A keyword search does not reproduce it, so without
+  sharing this the MCP server could not run the scenarios at all.
+
+### D-070 The trust policy as an MCP server
+- **Decision:** `mcp_server.py` exposes the corpus, the five skills and the
+  three defenses over MCP stdio, with `MF_DEFENSES` selecting which are on.
+- **Why this shape is the point:** in the web demo we own the agent, so a
+  sceptic can say the defenses only work because we wrote both sides. Over
+  MCP the client is someone else's model and the enforcement is still on this
+  side of the boundary. A model can be talked out of an instruction; it cannot
+  be talked out of a tool that refuses to execute. D2 and D3 are server-side
+  decisions, and that is exactly what makes them worth more than prompt text.
+- **`firewall_status` is readable by the model on purpose.** Knowing that
+  untrusted content is in context gains an attacker nothing — the refusal
+  already said so — and a model that can see the boundary can report the
+  injection instead of trying to route around it.
+- **Tested over the wire, not just in-process:** a test starts the server as a
+  subprocess, performs the MCP handshake, lists tools and asserts that a
+  `close_alert` call comes back refused. A server that imports cleanly and
+  dies on connect is the failure a client meets first.
+- **New dependency:** `mcp==2.2.0`, human-approved, pinned. Note FastMCP is
+  `MCPServer` in 2.x; v1 examples do not run against it.

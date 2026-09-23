@@ -548,45 +548,12 @@ SKILLS_DIR = BASE_DIR / "skills"
 #: because an injection keeps telling it to — must still terminate.
 MAX_MODEL_TURNS = 8
 
-#: Chunks pulled in for an alert before the first model turn.
-RETRIEVAL_LIMIT = 16
+# Alert-centric retrieval lives in `store.py` so the MCP server performs the
+# same retrieval without importing the web application. This is the step that
+# puts an injection in front of a model, so both surfaces have to do it
+# identically or the MCP server cannot reproduce the scenarios at all.
+from store import RETRIEVAL_LIMIT, retrieve_for_alert as _retrieve_for_alert  # noqa: E402
 
-#: Field ordering for retrieval. Per-field chunking means one alert can emit a
-#: dozen chunks, most of them a timestamp or a port number; without an order,
-#: a naive limit fills the context with metadata and never reaches the field
-#: that actually says something. Content first, identifiers next, bookkeeping
-#: last.
-_FIELD_PRIORITY = [
-    "summary",
-    "title",
-    "message",
-    "user_agent",
-    "url",
-    "referer",
-    "comment",
-    "body",
-    "dns_query",
-    "filename",
-    "host",
-    "hostname",
-    "src_ip",
-    "dest_ip",
-    "user",
-    "severity",
-    "rule",
-    "event_type",
-    "action",
-    "status",
-    "assignee",
-    "dest_port",
-    "related_logs",
-    "ts",
-]
-
-
-def _field_rank(chunk_id: str) -> int:
-    field_name = chunk_id.split(":")[-1]
-    return _FIELD_PRIORITY.index(field_name) if field_name in _FIELD_PRIORITY else len(_FIELD_PRIORITY)
 
 EVENT_KINDS = frozenset(
     {"run_started", "model", "retrieval", "tool_call", "tool_result", "memory_write", "blocked", "done"}
@@ -895,153 +862,18 @@ def _chunk_view(chunk: store.Chunk) -> dict:
     }
 
 
-#: What counts as tag-like, in two rules.
-#:
-#: 1. A named tag: `<` or `</`, then optionally `!`/`?`, then a letter, then
-#:    anything up to `>`. No length cap — `<system ` followed by 250
-#:    characters walked through an earlier `{0,200}` body.
-#: 2. Any bracketed run containing no whitespace at all: `<1system>`,
-#:    `</_system>`, `<untrusted-abc>`. A leading letter is not required,
-#:    because `<1system>` walked through an `[A-Za-z]`-only gate.
-#:
-#: Deliberately NOT matched: a bracketed run that carries whitespace and has
-#: no tag name, like `latency < 5ms and count > 3`. Stripping applies only to
-#: attacker-controllable chunks, which are exactly the evidence an analyst is
-#: reading — and a prose comparison is not what a model reads as a boundary.
-#: §5 asks for tag-like text to go; a defense that silently corrupts evidence
-#: has a cost of its own.
-#: 3. An HTML comment, which carries whitespace and has no tag name and so
-#:    would otherwise fall through both rules above.
-_TAGLIKE_PATTERNS = (
-    re.compile(r"<!--.*?-->", re.S),
-    re.compile(r"</?\s*[!?]?[A-Za-z][^<>]*>"),
-    re.compile(r"</?[^<>\s]*>"),
+# The defenses live in `defenses.py` so the MCP server enforces the same rules
+# without importing the web application. A second copy of a defense is a
+# second thing to get wrong; these aliases keep every existing caller working.
+from defenses import (  # noqa: E402
+    TAGLIKE_PATTERNS as _TAGLIKE_PATTERNS,
+    d1_annotation as _d1_annotation,
+    d3_blocks as _d3_blocks,
+    memory_tier as _memory_tier,
+    render_chunks as _render_chunks,
+    render_memory as _render_memory,
+    strip_taglike as _strip_taglike,
 )
-
-
-def _strip_taglike(text: str, nonce: str) -> str:
-    """Remove tag-shaped spans, and the run's nonce, from untrusted content.
-
-    Spotlighting only works if the boundary is unforgeable. Two things could
-    forge it: a literal `</untrusted-{nonce}>` (if the attacker learns the
-    nonce) and any other tag-shaped text that makes the model read the wrapper
-    as having ended — `</user>`, `<system>`, `<tool_result>`. Both go.
-
-    Stripping repeats to a fixed point. A single pass is defeated by nesting:
-    `</us<x>er>` has its inner `<x>` removed and reassembles into a working
-    `</user>`. Each pass strictly shortens the text, so this terminates.
-
-    The nonce is stripped even as bare text, so content cannot reconstruct a
-    closing tag out of pieces.
-    """
-    cleaned = text or ""
-    while True:
-        stripped = cleaned
-        for pattern in _TAGLIKE_PATTERNS:
-            stripped = pattern.sub("", stripped)
-        if stripped == cleaned:
-            break
-        cleaned = stripped
-    if nonce:
-        cleaned = cleaned.replace(nonce, "")
-    return cleaned
-
-
-def _render_chunks(chunks: list[store.Chunk], nonce: str | None = None) -> str:
-    """Retrieved context as the model sees it.
-
-    With no nonce (D1 off) chunks render plainly, which is the faithful
-    undefended baseline — S1f's forged tags have to survive verbatim for the
-    before/after to mean anything. With a nonce, every attacker-controllable
-    chunk is wrapped and its content stripped of tag-like text first.
-
-    This is the single choke point: the first prompt and every `search_logs`
-    result both render through here, so D1 covers both paths (D-018).
-    """
-    lines = []
-    for chunk in chunks:
-        if nonce and chunk.trust == store.ATTACKER_CONTROLLABLE:
-            body = _strip_taglike(chunk.text, nonce)
-            lines.append(
-                f'<untrusted-{nonce} source="{chunk.id}">\n{body}\n</untrusted-{nonce}>'
-            )
-        else:
-            lines.append(f"[{chunk.id}] (source: {chunk.source})\n{chunk.text}")
-    return "\n\n".join(lines)
-
-
-def _render_memory(records, nonce: str | None = None) -> str:
-    """Recalled facts as the model sees them.
-
-    Recalled memory is untrusted text in the prompt exactly as a retrieved
-    chunk is (D-013): the fact may have been derived from an attacker-written
-    ticket comment, and a human approving it does not make its wording safe.
-    Rendering it raw gave D1 a second, unspotlighted path into the prompt —
-    including a same-run round trip where content inside a wrapper asked the
-    model to copy the live nonce into a fact, and recall handed the real
-    closing tag back outside any wrapper.
-    """
-    lines = []
-    for record in records:
-        if nonce and record.trust == store.ATTACKER_CONTROLLABLE:
-            body = _strip_taglike(record.content, nonce)
-            lines.append(
-                f'<untrusted-{nonce} source="{record.id}">\n- {body}\n</untrusted-{nonce}>'
-            )
-        else:
-            lines.append(f"- {record.content}")
-    return "\n".join(lines)
-
-
-def _d1_annotation(chunks: list[store.Chunk], nonce: str | None) -> dict | None:
-    """What D1 did to a retrieval, for the trace (§5)."""
-    if not nonce:
-        return None
-    wrapped = [c.id for c in chunks if c.trust == store.ATTACKER_CONTROLLABLE]
-    stripped = [
-        c.id
-        for c in chunks
-        if c.trust == store.ATTACKER_CONTROLLABLE
-        and _strip_taglike(c.text, nonce) != c.text
-    ]
-    return {
-        "id": "D1",
-        # Named for what it does rather than for the technique. The technique
-        # is known in the literature as spotlighting; that name is kept in
-        # CLAUDE.md §5 and DECISIONS so the prior art stays findable, but it
-        # collided with the UI's own red-border highlight — which is the
-        # "spotlight" a viewer actually sees, and is not this defense.
-        "name": "untrusted_tagging",
-        "action": "tagged",
-        "nonce": nonce,
-        "trigger_chunks": wrapped,
-        "stripped_chunks": stripped,
-    }
-
-
-def _memory_tier(defenses: dict, untrusted_in_context: bool, untrusted_provenance_ids) -> str:
-    """D2: where a memory write lands.
-
-    Two signals, either of which is enough. `untrusted_in_context` is the
-    authoritative record of what the model actually read (D-013); the
-    provenance ids catch the case where a source cannot be resolved at all,
-    which D-012 already treats as untrusted. Fail closed: quarantine is
-    recoverable by a human clicking approve, a poisoned long-term fact is not.
-    """
-    if not defenses.get("D2"):
-        return "long_term"
-    return "quarantine" if (untrusted_in_context or list(untrusted_provenance_ids or [])) else "long_term"
-
-
-def _d3_blocks(defenses: dict, skill, untrusted_in_context: bool) -> bool:
-    """D3: whether a privileged call is refused.
-
-    Deterministic and narrow — privilege plus untrusted context, nothing
-    about what the content says. A read_only skill is never blocked: the
-    agent has to stay able to investigate, or the defense would simply stop
-    the demo working.
-    """
-    return bool(defenses.get("D3")) and skill.is_privileged and untrusted_in_context
 
 
 class _Trace:
@@ -1124,74 +956,6 @@ class _Trace:
             if record.trust == store.ATTACKER_CONTROLLABLE:
                 self.untrusted_in_context = True
             self._add_provenance([record.id, *record.provenance])
-
-
-def _retrieve_for_alert(conn, alert_id: str, limit: int = RETRIEVAL_LIMIT) -> list[store.Chunk]:
-    """Pull the alert and the logs it references.
-
-    This is the RAG step an analyst assistant actually performs: the alert
-    names related records, so those get read. It is also how the injection
-    gets in — evt-00042 is in ALR-1001's related_logs, and one of its fields
-    is attacker-controlled.
-
-    Documents are interleaved rather than concatenated, so every related log
-    contributes its most informative field before any document contributes its
-    second. Otherwise the first log's metadata crowds out the fourth log
-    entirely, and which record gets read becomes an accident of file order.
-    """
-    documents: list[list[store.Chunk]] = []
-    seen: set[str] = set()
-
-    def collect(doc_type: str, doc_id: str) -> None:
-        rows = conn.execute(
-            "SELECT id FROM chunks WHERE doc_type = ? AND doc_id = ?", (doc_type, doc_id)
-        ).fetchall()
-        chunks = []
-        for (chunk_id,) in sorted(rows, key=lambda r: _field_rank(r[0])):
-            if chunk_id in seen:
-                continue
-            chunk = store.get_chunk(conn, chunk_id)
-            if chunk is not None:
-                seen.add(chunk_id)
-                chunks.append(chunk)
-        if chunks:
-            documents.append(chunks)
-
-    collect("alert", alert_id)
-
-    def collect_linked(field: str, doc_type: str) -> None:
-        row = conn.execute(
-            "SELECT text FROM chunks WHERE id = ?", (f"alert:{alert_id}:{field}",)
-        ).fetchone()
-        for doc_id in (row[0].split() if row else ()):
-            collect(doc_type, doc_id)
-
-    collect_linked("related_logs", "log")
-    # Tickets are linked explicitly rather than discovered by keyword: a
-    # ticket comment is where S2's poison and S3's fake remediation step live,
-    # and which record reaches the model must not be an accident of bm25
-    # ranking (D-011, D-017).
-    collect_linked("related_tickets", "ticket")
-
-    # Round-robin across documents, most informative field of each first.
-    ordered: list[store.Chunk] = []
-    for rank in range(max((len(d) for d in documents), default=0)):
-        for doc in documents:
-            if rank < len(doc):
-                ordered.append(doc[rank])
-
-    # Top up with a keyword search on the alert's host, so anything the
-    # related_logs list missed can still surface.
-    host_row = conn.execute(
-        "SELECT text FROM chunks WHERE id = ?", (f"alert:{alert_id}:host",)
-    ).fetchone()
-    if host_row:
-        for chunk in store.search(conn, host_row[0], limit=5):
-            if chunk.id not in seen:
-                seen.add(chunk.id)
-                ordered.append(chunk)
-
-    return ordered[:limit]
 
 
 def _tool_result_block(tool_use_id: str, content: str, is_error: bool = False) -> dict:
