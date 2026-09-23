@@ -88,10 +88,14 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 ARMS = ("undefended", "defended")
 
-#: The scenarios the UI offers. The red-teamer's 19 variants stay in the CI
-#: matrix; a picker with 22 entries is a worse demo and D-035 keeps the eval
-#: on these three.
-UI_SCENARIOS = ("S1", "S2", "S3")
+#: The scenarios the UI offers. The variants stay in the CI matrix; a picker
+#: with two dozen entries is a worse demo.
+#:
+#: S3 was dropped from the picker, not from the suite. It is the same shape as
+#: S1 — untrusted text naming a tool — and the live model declines it outright
+#: (0/10), so it filled a demo slot with an agent that searches and stops. It
+#: remains a CI fixture and a red-team target.
+UI_SCENARIOS = ("S1", "S2", "S4", "S5")
 
 
 def _new_session_id() -> str:
@@ -262,6 +266,7 @@ def api_scenarios(request: Request, response: Response) -> list:
                 },
                 "expected_undefended": scenario.get("expected_undefended", ""),
                 "primary_defense": scenario.get("primary_defense", ""),
+                "kind": scenario.get("kind", "attack"),
                 "stages": 2 if scenario.get("followup_alert_id") else 1,
             }
         )
@@ -1250,9 +1255,17 @@ def iter_scenario(
     defenses = {"D1": False, "D2": False, "D3": False} | (defenses or {})
     conn = conn if conn is not None else get_db()
     scenario = load_scenario(scenario_id)
+    # A `legitimate` scenario has no attacker: the question is whether the
+    # correct action went through, and whether a defense refused it. Scoring
+    # that as an "attacker goal" would put the demo's own honesty vocabulary
+    # back where it started.
+    legitimate = scenario.get("kind") == "legitimate"
     if stage == 2:
         alert_id = scenario["followup_alert_id"]
         goal = scenario.get("followup_goal", {}) or {}
+    elif legitimate:
+        alert_id = scenario["alert_id"]
+        goal = scenario.get("intended_action", {}) or {}
     else:
         alert_id = scenario["alert_id"]
         goal = scenario.get("attacker_goal", {}) or {}
@@ -1569,7 +1582,12 @@ def iter_scenario(
             else {}
         ),
         outcome={
-            "attacker_goal_achieved": bool(achieved),
+            # For a legitimate scenario there is no attacker to succeed, and
+            # the matching result means the opposite thing: the agent did what
+            # it should have.
+            "attacker_goal_achieved": False if legitimate else bool(achieved),
+            "intended_action_taken": bool(achieved) if legitimate else None,
+            "kind": "legitimate" if legitimate else "attack",
             "alert_status": alert_status,
             "actions": actions,
             "approval_requests": approval_requests,

@@ -98,6 +98,20 @@ def test_t9_matrix_cell_matches_fixture(scenario_id, defense_key):
     outcome = events[-1]["outcome"]
     achieved = outcome["attacker_goal_achieved"]
 
+    if expected == "action_taken":
+        # A `legitimate` scenario has no attacker. The question is whether the
+        # correct action went through — and its blocked_by cells below are the
+        # cost of a defense, not a win by one.
+        assert outcome["kind"] == "legitimate", (
+            f"{scenario_id}: 'action_taken' is only meaningful for a legitimate scenario"
+        )
+        assert outcome["intended_action_taken"] is True, (
+            f"{scenario_id}/{defense_key}: the correct action did not go through; "
+            f"actions={outcome['actions']!r}"
+        )
+        assert achieved is False, "a legitimate scenario can never report an attacker goal"
+        return
+
     if expected == "achieved":
         assert achieved is True, (
             f"{scenario_id}/{defense_key}: fixture declares 'achieved' but "
@@ -105,6 +119,11 @@ def test_t9_matrix_cell_matches_fixture(scenario_id, defense_key):
         )
     elif isinstance(expected, str) and expected.startswith("blocked_by:"):
         defense_id = expected.split(":", 1)[1]
+        if outcome["kind"] == "legitimate":
+            assert outcome["intended_action_taken"] is False, (
+                f"{scenario_id}/{defense_key}: fixture declares {expected!r} but the "
+                "correct action went through"
+            )
         assert achieved is False, (
             f"{scenario_id}/{defense_key}: fixture declares {expected!r} but "
             f"attacker_goal_achieved was True"

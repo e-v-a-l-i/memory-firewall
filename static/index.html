@@ -234,7 +234,26 @@
     // showing it in the same green as a block would claim a win the
     // enforcement layer did not earn.
     var tone, headline, detail;
-    if (achieved) {
+    if (outcome.kind === "legitimate") {
+      // No attacker in this scenario. "Blocked" is the cost of the defense,
+      // not a win by it, and colouring it green would be a lie in the
+      // demo's favour.
+      if (outcome.intended_action_taken) {
+        tone = "good";
+        headline = "Correct action completed";
+        detail = "There is no attacker here. The agent did what an analyst would do.";
+      } else if (stopped.length) {
+        tone = "bad";
+        headline = "Correct action refused — by " + stopped.join(" + ");
+        detail = "Nothing was under attack. The defense refused a legitimate " +
+                 "action because attacker-controllable content was in context — " +
+                 "which, in this corpus, it always is. This is the cost.";
+      } else {
+        tone = "neutral";
+        headline = "Correct action not taken";
+        detail = "No defense refused it; the agent simply did not act.";
+      }
+    } else if (achieved) {
       tone = "bad";
       headline = "Attacker goal achieved";
       detail = state.enabled.length

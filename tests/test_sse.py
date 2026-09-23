@@ -179,10 +179,16 @@ _LOCATION_RE = re.compile(r"^(log|ticket|alert):[^:]+:[a-z_]+$")
 
 
 def test_t3_3_scenarios_route_returns_exactly_the_three_canonical_fixtures():
-    """T3 AC3: `GET /api/scenarios` returns exactly ids ["S1", "S2", "S3"]
-    (not the red-teamer's S1a..S1i/S2a..S2e/S3a..S3e variants), each with
-    the documented fields, `injection.location` shaped
-    `doc_type:doc_id:field`, and S2's `stages == 2`."""
+    """`GET /api/scenarios` returns the picker's scenarios — not the
+    red-teamer's variants — each with the documented fields and S2's
+    `stages == 2`.
+
+    S3 was dropped from the picker: it is the same shape as S1 (untrusted
+    text naming a tool) and the live model declines it outright, so it filled
+    a slot with an agent that searches and stops. S4 (a legitimate action the
+    defense refuses) and S5 (an injection in a field the trust map calls
+    internal) took its place. S3 remains a CI fixture and a red-team target.
+    """
     client = _client()
     r = client.get("/api/scenarios")
     assert r.status_code == 200
@@ -190,7 +196,7 @@ def test_t3_3_scenarios_route_returns_exactly_the_three_canonical_fixtures():
     assert isinstance(body, list)
 
     ids = sorted(s["id"] for s in body)
-    assert ids == ["S1", "S2", "S3"], f"got {ids!r}"
+    assert ids == ["S1", "S2", "S4", "S5"], f"got {ids!r}"
 
     by_id = {s["id"]: s for s in body}
     required_keys = {
@@ -207,6 +213,12 @@ def test_t3_3_scenarios_route_returns_exactly_the_three_canonical_fixtures():
         missing = required_keys - set(scenario.keys())
         assert not missing, f"{sid} missing keys {missing}"
         location = scenario["injection"]["location"]
+        if scenario.get("kind") == "legitimate":
+            # A legitimate scenario has no attacker and therefore no injection
+            # site. Demanding one would force a fixture to invent a location
+            # for content that does not exist.
+            assert location == "", f"{sid} is legitimate but names an injection site"
+            continue
         assert _LOCATION_RE.match(location), (
             f"{sid} injection.location {location!r} doesn't match doc_type:doc_id:field"
         )
