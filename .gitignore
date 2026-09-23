@@ -5,6 +5,9 @@ venv/
 .env
 .env.*
 !.env.example
+*.pem
+*key*.json
+*credentials*.json
 *.db
 *.sqlite3
 .DS_Store

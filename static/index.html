@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Firewall</title>
+<style>
+  :root { color-scheme: light dark; --fg: #16181d; --muted: #5c6370; --bg: #fbfbfa; --line: #e3e3e0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #ececec; --muted: #9a9a9a; --bg: #1b1b19; --line: #34342f; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 48px 16px; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 ui-sans-serif, -apple-system, system-ui, sans-serif;
+  }
+  main { max-width: 34rem; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .5rem; letter-spacing: -0.01em; }
+  p { color: var(--muted); margin: 0 0 1rem; }
+  ol { color: var(--muted); padding-left: 1.2rem; margin: 0; }
+  li { margin: .35rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .875em; }
+  .status { border-top: 1px solid var(--line); margin-top: 1.5rem; padding-top: 1rem; font-size: .875rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Memory Firewall</h1>
+  <p>
+    Prompt-injection attacks against a SOC triage agent that uses retrieval,
+    memory and skills — and the layered defenses that stop them. Run each
+    attack with defenses off, then on, and see where the injection entered
+    and which defense caught it.
+  </p>
+  <ol>
+    <li>S1 — retrieval hijack: an instruction hidden in a log's user-agent</li>
+    <li>S2 — memory poisoning: a ticket comment that plants a false fact</li>
+    <li>S3 — privileged skill abuse: an injected "remediation step"</li>
+  </ol>
+  <p class="status">
+    Skeleton only — the scenario UI arrives in M3.
+    Liveness: <a href="/health"><code>/health</code></a>
+  </p>
+</main>
+</body>
+</html>

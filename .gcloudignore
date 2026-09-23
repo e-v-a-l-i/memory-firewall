@@ -1,0 +1,22 @@
+# gcloud uses this file verbatim instead of generating one, so it must
+# re-include .gitignore explicitly or anything git-ignored (.env, keys)
+# would be uploaded to Cloud Build and baked into the image.
+#!include:.gitignore
+
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests/
+requirements-dev.txt
+.claude/
+
+# Credential shapes, restated so they hold even if .gitignore changes.
+.env
+.env.*
+*.pem
+*key*.json
+*credentials*.json
