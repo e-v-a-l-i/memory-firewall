@@ -237,6 +237,10 @@ def api_config(request: Request, response: Response) -> dict:
         "live_available": _live_available(),
         "replay_available": _replay_available(),
         "defenses": ["D1", "D2", "D3"],
+        # Exposed so the smoke test can size its probe to the real limit
+        # rather than guessing. Not a secret: a client discovers it by
+        # hitting the limit anyway.
+        "rate_limit_per_min": _int_env("RATE_LIMIT_PER_MIN", RATE_LIMIT_DEFAULT),
     }
 
 
@@ -359,20 +363,19 @@ def api_run(
     # The rate limit counts requests; it does not bound work in flight. Each
     # run occupies a threadpool slot for its whole duration, so without this a
     # handful of clients can hold every slot on a one-instance service.
+    run_key = client_key(request)
     with _RUN_LOCK:
-        if _RUNS_IN_FLIGHT["n"] >= MAX_CONCURRENT_RUNS:
+        per_client = _RUNS_PER_CLIENT.get(run_key, 0)
+        if _RUNS_IN_FLIGHT["n"] >= MAX_CONCURRENT_RUNS or (
+            per_client >= MAX_CONCURRENT_RUNS_PER_CLIENT
+        ):
             raise HTTPException(
                 status_code=429,
                 detail="too many runs in progress",
                 headers={"Retry-After": "5"},
             )
         _RUNS_IN_FLIGHT["n"] += 1
-
-    cap = _int_env("SESSION_TOKEN_CAP", 0)
-    budget = cap if cap > 0 else None
-
-    conn = get_db()
-    run_session = _arm_session(session_id, arm)
+        _RUNS_PER_CLIENT[run_key] = per_client + 1
 
     released = {"done": False}
 
@@ -381,6 +384,28 @@ def api_run(
             released["done"] = True
             with _RUN_LOCK:
                 _RUNS_IN_FLIGHT["n"] = max(0, _RUNS_IN_FLIGHT["n"] - 1)
+                remaining = _RUNS_PER_CLIENT.get(run_key, 1) - 1
+                if remaining > 0:
+                    _RUNS_PER_CLIENT[run_key] = remaining
+                else:
+                    # Removed rather than left at zero, so the map cannot grow
+                    # one entry per client seen.
+                    _RUNS_PER_CLIENT.pop(run_key, None)
+
+    try:
+        cap = _int_env("SESSION_TOKEN_CAP", 0)
+        budget = cap if cap > 0 else None
+        # `get_db()` can raise — a locked database, a full disk, EPERM creating
+        # the directory. The release used to live only in the generator's
+        # `finally`, so anything raising here held the slot forever: four
+        # transient errors wedged /api/run at 429 for the life of the process,
+        # and with --max-instances 1 nothing restarts it. The guardrail becomes
+        # the outage.
+        conn = get_db()
+        run_session = _arm_session(session_id, arm)
+    except BaseException:
+        release_slot()
+        raise
 
     def stream():
         # Flushed immediately so the browser's onopen fires before retrieval.
@@ -598,14 +623,20 @@ RATE_LIMIT_DEFAULT = 600
 #: A ceiling on distinct keys tracked in one window. An attacker choosing the
 #: key would otherwise grow this map without bound on a single instance.
 RATE_LIMIT_MAX_KEYS = 4096
-#: The UI opens two streams at once and S2 opens a third in sequence.
-MAX_CONCURRENT_RUNS = 4
+#: The UI opens two streams at once and S2 opens a third in sequence, so one
+#: visitor needs three. A global-only cap meant two people clicking at the
+#: same moment on a public URL exhausted it — a routine collision, not an
+#: attack — and one client holding slow-read streams could deny everyone with
+#: four requests, which the per-minute rate limit does not bound.
+MAX_CONCURRENT_RUNS = 12
+MAX_CONCURRENT_RUNS_PER_CLIENT = 3
 
 _RATE_LOCK = threading.Lock()
 _RATE_WINDOW = {"minute": -1, "counts": {}}
 
 _RUN_LOCK = threading.Lock()
 _RUNS_IN_FLIGHT = {"n": 0}
+_RUNS_PER_CLIENT: dict[str, int] = {}
 
 _BUDGET_LOCK = threading.Lock()
 _TOKENS_SPENT: dict[str, int] = {}
@@ -648,7 +679,14 @@ def client_key(request) -> str:
     """
     hops = _int_env("TRUSTED_PROXY_HOPS", 0)
     hops = min(hops, 4)
-    forwarded = request.headers.get("x-forwarded-for") or ""
+    # Every occurrence, not just the first. A proxy that appends as a separate
+    # header line rather than in place would otherwise invert the whole
+    # trust-from-the-right design: `headers.get` returns the FIRST header, so
+    # the attacker's own value would become the key — rotate it for unlimited
+    # requests, or pin a victim's address to block them. Cloud Run's front end
+    # appends in place today, which makes this latent rather than live, and it
+    # is the single assumption the guardrail rests on.
+    forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
     entries = [part.strip() for part in forwarded.split(",") if part.strip()]
     if len(entries) >= hops + 1:
         candidate = entries[-1 - hops]
@@ -669,6 +707,7 @@ def reset_rate_limits() -> None:
 def reset_run_slots() -> None:
     with _RUN_LOCK:
         _RUNS_IN_FLIGHT["n"] = 0
+        _RUNS_PER_CLIENT.clear()
 
 
 def reset_token_budgets() -> None:
@@ -698,7 +737,14 @@ def _rate_limit_check(key: str) -> tuple[bool, int]:
             _RATE_WINDOW["counts"] = {}
         counts = _RATE_WINDOW["counts"]
         if key not in counts and len(counts) >= RATE_LIMIT_MAX_KEYS:
-            return False, retry_after
+            # Fold into a shared bucket rather than refusing. Refusing meant an
+            # attacker with a /64 could fill the map with 4096 addresses — each
+            # under its own limit, so never throttled — and every new visitor
+            # got 429 for the rest of the minute while the attacker kept a full
+            # allowance. Failing open is not the alternative: that hands them
+            # unlimited requests. Bucketing keeps the map bounded and degrades
+            # an overflow client to sharing, not exclusion.
+            key = f"overflow-{hash(key) % 64}"
         counts[key] = counts.get(key, 0) + 1
         return counts[key] <= limit, retry_after
 
@@ -1284,7 +1330,13 @@ def iter_scenario(
         }
         for key, value in turn_usage.items():
             usage_total[key] += value
-        _spend_tokens(session_id, turn_usage["input_tokens"] + turn_usage["output_tokens"])
+        if budget is not None:
+            # Only tracked when a cap is in force. Writing unconditionally left
+            # a permanent entry for every cookie ever seen — the rate limiter
+            # got a bound, this map had none.
+            _spend_tokens(
+                session_id, turn_usage["input_tokens"] + turn_usage["output_tokens"]
+            )
 
         trace.emit(
             "model",
@@ -1308,7 +1360,11 @@ def iter_scenario(
         yield from trace.drain()
 
         if completion.stop_reason != "tool_use" or not completion.tool_calls:
-            reason = "end_turn"
+            # `no_response` means the provider returned nothing usable — a
+            # safety filter, a malformed call, an empty candidate. That is not
+            # the model declining the injection, and the outcome must not read
+            # as though it were.
+            reason = "no_response" if completion.stop_reason == "no_response" else "end_turn"
             break
 
         assistant_blocks = []

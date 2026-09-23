@@ -37,6 +37,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import sqlite3
+
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -459,7 +463,11 @@ def test_t2_12_api_run_is_rate_limited_too_and_the_429_is_json_not_sse(monkeypat
 
 
 def test_t3_0_max_concurrent_runs_defaults_to_four():
-    assert app.MAX_CONCURRENT_RUNS == 4
+    # Raised from 4 in the M4 review: a global-only cap of 4 collided
+    # between two ordinary visitors. The per-client cap is what bounds
+    # one caller now.
+    assert app.MAX_CONCURRENT_RUNS == 12
+    assert app.MAX_CONCURRENT_RUNS_PER_CLIENT == 3
 
 
 def test_reset_run_slots_exists_and_is_callable():
@@ -944,3 +952,184 @@ def test_t7_b_every_committed_replay_has_a_completion_with_nonzero_tokens():
         f"these recordings have zero token usage on every completion: {offenders} -- "
         "re-record with `scripts/eval.py --dry-run --record` after the T7-a fix lands"
     )
+
+
+# =============================================================================
+# M4 review findings
+# =============================================================================
+
+
+def test_a_full_key_map_does_not_lock_out_new_clients(monkeypatch):
+    """Finding: an overflowing key map refused every *new* client while the
+    keys already in it kept their full allowance.
+
+    An attacker with one IPv6 /64 fills the map with addresses that are each
+    under the per-key limit — so none is ever throttled — and `/api/*` closes
+    to every new visitor for the rest of the minute. Overflow keys now share a
+    bucket instead of being excluded.
+    """
+    monkeypatch.setenv("RATE_LIMIT_PER_MIN", "600")
+    monkeypatch.setattr(app, "RATE_LIMIT_MAX_KEYS", 8)
+    app.reset_rate_limits()
+
+    for i in range(8):
+        allowed, _ = app._rate_limit_check(f"filler-{i}")
+        assert allowed
+
+    allowed, _ = app._rate_limit_check("a-brand-new-visitor")
+    assert allowed, "a new client was refused because the key map was full"
+
+    allowed, _ = app._rate_limit_check("filler-0")
+    assert allowed, "an existing client should be unaffected"
+
+
+def test_overflow_keys_stay_bounded(monkeypatch):
+    """...and the map must still not grow without bound, or the fix trades a
+    denial of service for a memory leak."""
+    monkeypatch.setenv("RATE_LIMIT_PER_MIN", "600")
+    monkeypatch.setattr(app, "RATE_LIMIT_MAX_KEYS", 8)
+    app.reset_rate_limits()
+
+    for i in range(500):
+        app._rate_limit_check(f"client-{i}")
+
+    assert len(app._RATE_WINDOW["counts"]) <= 8 + 64
+
+
+def test_client_key_reads_every_forwarded_header_not_just_the_first():
+    """Finding: `headers.get` returns the FIRST X-Forwarded-For header.
+
+    A proxy that appends as a separate header line rather than in place would
+    invert the trust-from-the-right design (D-047) — the attacker's own value
+    becomes the key, which buys unlimited requests or lets them pin a victim's
+    address. Latent behind Cloud Run, which appends in place, and the one
+    assumption the whole guardrail rests on.
+    """
+    from starlette.datastructures import Headers
+
+    class _Request:
+        def __init__(self, raw):
+            self.headers = Headers(raw=raw)
+            self.client = SimpleNamespace(host="10.0.0.1")
+
+    request = _Request([
+        (b"x-forwarded-for", b"9.9.9.9"),
+        (b"x-forwarded-for", b"203.0.113.10"),
+    ])
+    assert app.client_key(request) == "203.0.113.10", (
+        "the trusted entry is the last one across ALL forwarded headers"
+    )
+
+
+def test_a_rate_limited_client_recovers_when_the_window_rolls(monkeypatch):
+    """The frozen clock these tests use would let a 'refused forever'
+    regression pass: nothing else advances time, and the reset fixture hides
+    it between tests."""
+    monkeypatch.setenv("RATE_LIMIT_PER_MIN", "2")
+    app.reset_rate_limits()
+
+    now = [1_700_000_000.0]
+    monkeypatch.setattr(app.time, "time", lambda: now[0])
+
+    assert app._rate_limit_check("steady-client")[0]
+    assert app._rate_limit_check("steady-client")[0]
+    assert not app._rate_limit_check("steady-client")[0], "the 3rd request should be refused"
+
+    now[0] += 60
+    assert app._rate_limit_check("steady-client")[0], (
+        "the client never recovered after the window rolled"
+    )
+
+
+def test_a_failure_before_the_stream_releases_its_run_slot(monkeypatch):
+    """Finding: the slot was released only in the generator's `finally`, so
+    anything raising between acquiring it and returning the response held it
+    forever. Four transient database errors wedged /api/run at 429 for the
+    life of the process — and with --max-instances 1 nothing restarts it.
+    """
+    from fastapi.testclient import TestClient
+
+    app.reset_run_slots()
+    client = TestClient(app.app, raise_server_exceptions=False)
+
+    def boom():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(app, "get_db", boom)
+    for _ in range(6):
+        client.get("/api/run", params={"scenario": "S1", "arm": "undefended",
+                                       "stage": 1, "mode": "mock"})
+
+    assert app._RUNS_IN_FLIGHT["n"] == 0, (
+        f"{app._RUNS_IN_FLIGHT['n']} run slot(s) leaked after failures before the stream"
+    )
+
+    # And the endpoint still works once the underlying problem clears.
+    monkeypatch.undo()
+    r = client.get("/api/run", params={"scenario": "S1", "arm": "undefended",
+                                       "stage": 1, "mode": "mock"})
+    assert r.status_code == 200
+
+
+def test_token_spend_is_not_accumulated_when_no_cap_is_configured():
+    """The rate limiter got a bounded key map; this one had nothing, and wrote
+    an entry for every cookie ever seen."""
+    app.reset_token_budgets()
+    conn = store.build_db(":memory:")
+    try:
+        app.run_scenario("S1", clients.MockClient(gullible=True), defenses=NO_DEFENSES,
+                         session_id="untracked#undefended", conn=conn, budget=None)
+        assert app.tokens_spent("untracked") == 0
+        assert not app._TOKENS_SPENT
+    finally:
+        conn.close()
+
+
+def test_one_client_cannot_hold_every_run_slot(monkeypatch):
+    """Finding: the run cap was global only, so two visitors clicking at the
+    same moment exhausted it — and one client holding slow-read streams could
+    deny everyone with four requests, which the per-minute limit does not
+    bound.
+
+    The held state is simulated rather than produced with real concurrent
+    streams: TestClient buffers a response fully before returning it, so a
+    stream opened through it has already finished and freed its slot.
+    """
+    from fastapi.testclient import TestClient
+
+    app.reset_run_slots()
+    monkeypatch.setattr(app, "MAX_CONCURRENT_RUNS_PER_CLIENT", 2)
+    monkeypatch.setattr(app, "MAX_CONCURRENT_RUNS", 12)
+
+    client = TestClient(app.app)
+    params = {"scenario": "S1", "arm": "undefended", "stage": 1, "mode": "mock"}
+
+    # Two runs already in flight for this caller, ten slots free globally.
+    with app._RUN_LOCK:
+        app._RUNS_IN_FLIGHT["n"] = 2
+        app._RUNS_PER_CLIENT["testclient"] = 2
+    try:
+        greedy = client.get("/api/run", params=params)
+        assert greedy.status_code == 429, "one client exceeded its own run allowance"
+        assert greedy.json() == {"detail": "too many runs in progress"}
+
+        other = client.get(
+            "/api/run", params=params, headers={"X-Forwarded-For": "203.0.113.7"}
+        )
+        assert other.status_code == 200, (
+            "a second visitor was refused because the first was hogging slots"
+        )
+    finally:
+        app.reset_run_slots()
+
+
+def test_a_completed_run_removes_its_per_client_entry():
+    """The per-client map must not grow one entry per visitor ever seen."""
+    from fastapi.testclient import TestClient
+
+    app.reset_run_slots()
+    client = TestClient(app.app)
+    client.get("/api/run", params={"scenario": "S1", "arm": "undefended",
+                                   "stage": 1, "mode": "mock"})
+    assert app._RUNS_PER_CLIENT == {}, f"leaked per-client entries: {app._RUNS_PER_CLIENT}"
+    assert app._RUNS_IN_FLIGHT["n"] == 0

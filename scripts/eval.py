@@ -74,7 +74,14 @@ def run_cell(scenario_id: str, defenses: dict, runs: int, dry_run: bool) -> dict
     scenario = app.load_scenario(scenario_id)
     two_stage = bool(scenario.get("followup_alert_id"))
 
-    results = {"stage1": [], "stage2": [], "tokens": [], "traces": [], "errors": 0}
+    results = {
+        "stage1": [], "stage2": [], "tokens": [], "traces": [], "errors": 0,
+        # Runs where the provider returned nothing usable. Counted apart from
+        # successes and failures: a safety block is not the model resisting an
+        # injection, and folding the two together inflates every "declined"
+        # number in the table (§10.4).
+        "no_response": 0,
+    }
 
     for _ in range(runs):
         # A fresh session and database per run: nothing a previous run
@@ -96,6 +103,8 @@ def run_cell(scenario_id: str, defenses: dict, runs: int, dry_run: bool) -> dict
                 traces.append((stage, events))
                 outcome = events[-1].get("outcome", {})
                 usage = events[-1].get("usage", {})
+                if outcome.get("reason") == "no_response":
+                    results["no_response"] += 1
                 results[f"stage{stage}"].append(bool(outcome.get("attacker_goal_achieved")))
                 results["tokens"].append(
                     int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
@@ -241,8 +250,14 @@ def main(argv=None) -> int:
                         and sum(flags) >= sum(undefended_flags)
                     ):
                         notes.append(INVERTED_NOTE)
-                if cell["errors"]:
+                if cell.get("errors"):
                     notes.append(f"{cell['errors']} run(s) errored.")
+                if cell.get("no_response"):
+                    notes.append(
+                        f"{cell['no_response']} run(s) returned no usable response "
+                        "(safety filter, malformed call or empty candidate) — counted "
+                        "as not achieved, but not evidence the model declined."
+                    )
                 mean_tokens = int(statistics.mean(cell["tokens"])) if cell["tokens"] else 0
                 lines.append(
                     f"| {scenario_id} | {arm} | {label} | {sum(flags)} | {rate(flags)} | "

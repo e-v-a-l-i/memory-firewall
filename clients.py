@@ -428,9 +428,19 @@ class FallbackClient:
 _GEMINI_FINISH_REASONS = {
     "STOP": "end_turn",
     "MAX_TOKENS": "max_tokens",
-    "SAFETY": "end_turn",
-    "RECITATION": "end_turn",
 }
+
+#: Reasons where the model produced nothing usable — filtered, malformed, or
+#: cut off upstream. These must NOT map to `end_turn`: the eval counts a run
+#: that ends without achieving the attacker's goal as the model *resisting*
+#: the injection, and a safety block is not resistance. Conflating them would
+#: quietly inflate every "the model declined" number in the table (§10.4).
+_GEMINI_UNUSABLE_REASONS = frozenset({
+    "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+    "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "IMAGE_SAFETY",
+    "LANGUAGE", "OTHER", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
+    "IMAGE_OTHER", "NO_IMAGE", "TOO_MANY_TOOL_CALLS",
+})
 
 
 def _json_type_to_gemini(json_type: str):
@@ -563,14 +573,26 @@ class GeminiClient:
     ) -> Completion:
         from google.genai import types
 
+        config_kwargs = dict(
+            system_instruction=system or None,
+            tools=_tools_to_gemini(tools),
+            max_output_tokens=max_tokens,
+        )
+        # §7 asks for fallback when a live call "errors or times out". The
+        # timeout half did not exist for the provider actually serving live
+        # traffic: a hung call would hold an SSE stream and a concurrency slot
+        # indefinitely, and FallbackClient would never get its chance.
+        try:
+            config_kwargs["http_options"] = types.HttpOptions(
+                timeout=int(self._timeout * 1000)
+            )
+        except (AttributeError, TypeError):  # older SDKs without HttpOptions
+            pass
+
         response = self._sdk.models.generate_content(
             model=self._model,
             contents=_messages_to_gemini(messages),
-            config=types.GenerateContentConfig(
-                system_instruction=system or None,
-                tools=_tools_to_gemini(tools),
-                max_output_tokens=max_tokens,
-            ),
+            config=types.GenerateContentConfig(**config_kwargs),
         )
 
         text_parts, tool_calls = [], []
@@ -597,15 +619,31 @@ class GeminiClient:
         finish = getattr(raw_finish, "name", None) or str(raw_finish or "STOP")
         # Gemini reports STOP even when it asked for a function call, so the
         # calls decide the stop reason — the loop keys off `tool_use`.
-        stop_reason = "tool_use" if tool_calls else _GEMINI_FINISH_REASONS.get(finish, "end_turn")
+        if tool_calls:
+            stop_reason = "tool_use"
+        elif finish in _GEMINI_UNUSABLE_REASONS:
+            stop_reason = "no_response"
+        else:
+            stop_reason = _GEMINI_FINISH_REASONS.get(finish, "end_turn")
 
         usage = getattr(response, "usage_metadata", None)
+        # Thinking tokens are billed and are not in `candidates_token_count`.
+        # Omitting them made the session token cap bound less than actual
+        # spend — an undercount in the unsafe direction, for the only provider
+        # that spends anything.
+        output_tokens = (
+            int(getattr(usage, "candidates_token_count", 0) or 0)
+            + int(getattr(usage, "thoughts_token_count", 0) or 0)
+        )
         return Completion(
             text="".join(text_parts),
             tool_calls=tool_calls,
             stop_reason=stop_reason,
             usage={
-                "input_tokens": int(getattr(usage, "prompt_token_count", 0) or 0),
-                "output_tokens": int(getattr(usage, "candidates_token_count", 0) or 0),
+                "input_tokens": (
+                    int(getattr(usage, "prompt_token_count", 0) or 0)
+                    + int(getattr(usage, "tool_use_prompt_token_count", 0) or 0)
+                ),
+                "output_tokens": output_tokens,
             },
         )

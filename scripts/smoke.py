@@ -135,6 +135,22 @@ class Smoke:
         host = self.base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
         return host not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
+    def configured_limit(self) -> int:
+        """The service's own RATE_LIMIT_PER_MIN, so the probe can reach it.
+
+        Guessing a fixed 40 requests meant the check silently skipped against
+        a service configured at 600 — D-047 claims this verifies the
+        forwarded-header handling against the deployment, and a check that
+        never runs verifies nothing.
+        """
+        status, body = self.get("/api/config")
+        if status != 200:
+            return 0
+        try:
+            return int(json.loads(body).get("rate_limit_per_min") or 0)
+        except (ValueError, TypeError):
+            return 0
+
     def rate_limit(self, attempts: int = 40) -> None:
         """The one behaviour that cannot be checked locally.
 
@@ -144,6 +160,15 @@ class Smoke:
         trusted it, every request would look like a new client and no 429
         would ever appear.
         """
+        configured = self.configured_limit()
+        # Only auto-size when the probe stays cheap. Firing 605 requests at a
+        # demo service on every deploy costs more than the check is worth; an
+        # operator who wants it exercised lowers the limit for one run.
+        if configured and configured + 5 <= 200:
+            attempts = configured + 5
+        elif configured:
+            print(f"  NOTE  RATE_LIMIT_PER_MIN={configured} is too high to probe "
+                  "cheaply; lower it temporarily to exercise this check")
         codes = [self.get("/api/config")[0] for _ in range(attempts)]
         limited = 429 in codes
         # 0 = the connection was closed without a response. Cloud Run does

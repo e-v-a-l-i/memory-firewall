@@ -573,6 +573,14 @@ Key tradeoffs, recorded as they are made (§12). Format:
   the rightmost entry and is trusted by design. `scripts/smoke.py` asserts it
   against the deployed URL and prints an explicit SKIP against localhost
   rather than asserting something that cannot fail there.
+- **How it was actually verified, and the honest limit of the check:** the
+  deployed `RATE_LIMIT_PER_MIN=600` is higher than the smoke probe will fire,
+  so the check skips by default rather than passing vacuously — an earlier
+  version reported a green "rate limit engages" from 40 requests that never
+  came close to it. It was verified once by temporarily setting the deployed
+  limit to 15, where the forged-header check passes against the real proxy.
+  Re-verifying means lowering the limit for one run; the probe auto-sizes when
+  the configured limit is 200 or less.
 
 ### D-048 A fixed window, replaced wholesale each minute
 - **Options:** a per-key sliding-window deque; a fixed window discarded each
@@ -633,17 +641,29 @@ Key tradeoffs, recorded as they are made (§12). Format:
 - **Fix:** `model` events carry the turn's usage, and the recordings were
   refreshed (4,708–6,411 tokens per run).
 
-### D-054 Where M4 leaves §11
-- **Met:** all tests pass on `MockClient` with no network (451); every
-  scenario shows a hijack undefended and a block with a defense, in replay;
-  DECISIONS.md records the tradeoffs; README explains the demo in under a
-  minute; the deployed URL works from a fresh browser.
-- **Not met, and why:** the live-mode half of "each scenario ... in live mode"
-  and the substance of "eval table committed". Vertex has zero Claude quota on
-  this project (D-041), re-confirmed during M4 with the same 429. The
-  committed table measures the enforcement layer, not Claude, and both
-  `replays/eval.md` and the README say so in their own words. Re-running
-  `scripts/eval.py` without `--dry-run` replaces both and nothing else.
+### D-054 Where the build leaves §11
+*(Rewritten after D-057. The original text described the pre-Gemini state —
+a mock-recorded table and no live mode — and contradicted D-057/D-058 three
+entries later. A decision log that gives two accounts of the same milestone
+is worse than one that gives none.)*
+
+- **Met:** the suite passes on `MockClient` with no network and no
+  credentials; live mode works (on Gemini); the eval table is committed with
+  real 10-runs-per-cell numbers; the README explains the demo in under a
+  minute; DECISIONS records the tradeoffs; the deployed URL works from a fresh
+  browser on desktop and phone, light and dark.
+- **Met with a caveat — "each scenario shows a hijack undefended and a block
+  with its primary defense, in live mode and in replay":** true for S1 and S2.
+  **Not true for S3 in replay or live**, because Gemini 2.5 Flash declines that
+  injection outright (0/10 undefended), so there is no hijack to block. The
+  scenario is kept and the result reported, per §10.4 — model-level resistance
+  is a finding, not a broken fixture — and S3's D3 block is demonstrated
+  deterministically in `mock` mode and asserted in the CI matrix. The README
+  says this where a visitor will meet it.
+- **Met differently than specified — "eval table committed":** the numbers
+  describe Gemini, not Claude (D-057, D-058). §2's provider has no entitlement
+  on this project. `LIVE_PROVIDER=claude` reproduces the table against Claude
+  the day that changes; nothing else needs to move.
 
 ### D-055 The service account was not narrowed
 - **Deferred deliberately.** The Cloud Run service still runs as the default
@@ -731,3 +751,34 @@ Key tradeoffs, recorded as they are made (§12). Format:
   summarised by a single number without saying so.
 - **Unchanged:** D2 and D3 are deterministic and are proven in CI. None of
   this touches them.
+
+### D-060 The M4 review, and what it caught
+Run after the human approved the milestone rather than before it, so these
+landed as a follow-up commit. Findings worth recording beyond the fixes:
+
+- **A full rate-limit key map denied new clients while the keys already in it
+  kept their allowance.** An attacker with one IPv6 /64 could fill it with
+  addresses that are each under the per-key limit — never throttled — and
+  close `/api/*` to every new visitor. Overflow keys now share a bucket:
+  bounded by construction, degrading to sharing rather than exclusion.
+  Failing open was not an option; that hands them unlimited requests.
+- **The concurrent-run slot leaked on any error between acquiring it and
+  starting the stream.** Four transient database errors wedged `/api/run` at
+  429 for the life of the process, and `--max-instances 1` means nothing
+  restarts it. A guardrail that becomes the outage is worse than no guardrail.
+- **`client_key` read only the first `X-Forwarded-For` header.** Latent behind
+  Cloud Run, which appends in place — but it is the single assumption
+  D-047's design rests on, and the smoke test cannot detect it because it
+  sends one header. Now joins every occurrence.
+- **Every degenerate Gemini response looked like the model declining.** A
+  safety filter, a malformed function call or an empty candidate all returned
+  `end_turn` with no tool calls, which `scripts/eval.py` counts as the model
+  resisting the injection. That would have quietly inflated the "declined"
+  numbers the eval exists to report honestly. Those reasons now map to
+  `no_response`, the loop records it as a distinct outcome, and the eval
+  counts and footnotes them separately.
+- **The session token cap undercounted Gemini spend**, because thinking tokens
+  are billed and are not in `candidates_token_count` — an undercount in the
+  unsafe direction for the only provider that spends anything.
+- **No timeout was configured on live Gemini calls**, so §7's "errors or times
+  out" fallback had no timeout half for the provider actually serving traffic.

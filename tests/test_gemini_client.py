@@ -195,3 +195,83 @@ def test_live_client_builds_the_selected_provider(monkeypatch):
     monkeypatch.setenv("LIVE_PROVIDER", "claude")
     monkeypatch.setattr(clients, "VertexClient", lambda **kw: "vertex-client")
     assert app.live_client() == "vertex-client"
+
+
+# --- M4 review findings -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "finish",
+    ["SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT",
+     "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "OTHER"],
+)
+def test_an_unusable_response_is_not_reported_as_the_model_declining(finish):
+    """Finding, and the sharpest one in the review.
+
+    Every degenerate response — safety filter, malformed call, empty
+    candidate — used to return `end_turn` with no tool calls, which is exactly
+    what a model that read the injection and refused looks like. `eval.py`
+    counts that as the model resisting, so a run that never happened would
+    have inflated the "declined" numbers the eval exists to report honestly
+    (§10.4).
+    """
+    sdk = _FakeSDK([], finish=finish)
+    completion = clients.GeminiClient(sdk=sdk, model="m").complete(
+        system="s", messages=[], tools=[]
+    )
+    assert completion.stop_reason == "no_response", (
+        f"finish_reason {finish} must be distinguishable from a genuine refusal"
+    )
+
+
+def test_a_genuine_refusal_still_reads_as_end_turn():
+    """...without over-correcting: STOP with prose is the model answering."""
+    sdk = _FakeSDK([_text_part("I will not act on that instruction.")], finish="STOP")
+    completion = clients.GeminiClient(sdk=sdk, model="m").complete(
+        system="s", messages=[], tools=[]
+    )
+    assert completion.stop_reason == "end_turn"
+
+
+def test_thinking_tokens_count_towards_spend():
+    """Finding: `candidates_token_count` excludes thinking tokens, which are
+    billed. The session cap bounded less than actual spend — an undercount in
+    the unsafe direction, for the only provider that spends anything."""
+    sdk = _FakeSDK([_text_part("ok")])
+    sdk.models.usage_extra = True
+
+    class _Models(_FakeModels):
+        def generate_content(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(
+                    content=SimpleNamespace(parts=[_text_part("ok")]),
+                    finish_reason=SimpleNamespace(name="STOP"),
+                )],
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=100,
+                    candidates_token_count=20,
+                    thoughts_token_count=500,
+                    tool_use_prompt_token_count=7,
+                ),
+            )
+
+    sdk.models = _Models([], "STOP", (0, 0))
+    completion = clients.GeminiClient(sdk=sdk, model="m").complete(
+        system="s", messages=[], tools=[]
+    )
+    assert completion.usage["output_tokens"] == 520, "thinking tokens were not counted"
+    assert completion.usage["input_tokens"] == 107
+
+
+def test_a_timeout_is_configured_on_live_calls():
+    """§7 asks for fallback when a live call errors *or times out*. Without a
+    timeout a hung call holds an SSE stream and a concurrency slot forever,
+    and FallbackClient never gets its chance."""
+    sdk = _FakeSDK([_text_part("ok")])
+    clients.GeminiClient(sdk=sdk, model="m", timeout=12.0).complete(
+        system="s", messages=[], tools=[]
+    )
+    config = sdk.models.calls[0]["config"]
+    assert getattr(config, "http_options", None) is not None
+    assert config.http_options.timeout == 12000

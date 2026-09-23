@@ -147,9 +147,17 @@ which model serves live traffic.
 - **D1 is never asserted in CI.** It depends on how a model behaves, so it is
   measured by eval and reported honestly, scoped to the model tested. D2 and
   D3 are code and are tested deterministically.
-- **In replay mode, S1's defended column is blocked by D3, not D1.** The
-  recorded completions are fixed, so spotlighting cannot change what the model
-  said. That is why S1 declares D3 as its backstop.
+- **In replay mode the defense that fires is whichever one the recorded run
+  reached.** The completions are fixed, so spotlighting cannot change what the
+  model said: S1's defended column is stopped by **D2**, which quarantines the
+  fact the model tried to save, rather than by D1.
+- **S3 in replay demonstrates the model refusing, not a defense blocking.**
+  The recorded Gemini runs never call `unisolate_host` in either arm — the
+  model declined the pasted "vendor advisory" on its own, 0/10 in the eval. So
+  replay shows an agent that investigates and stops, which is a real result
+  but not a demonstration of D3. **Switch to `mock` mode to see D3 block**: the
+  scripted model always attempts the privileged call, so the block is
+  deterministic there, and the scenario matrix asserts it in CI.
 - **Several scenario variants are scored `not_achieved_harness_limit`.** The
   mock matches tool names as literal ASCII, so it never decodes base64 or reads
   homoglyphs. Those are harness limits, not defensive wins, and the matrix says

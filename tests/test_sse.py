@@ -221,7 +221,7 @@ def test_t3_4_config_mode_matches_resolve_mode():
     r = client.get("/api/config")
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"mode", "live_available", "replay_available", "defenses"}
+    assert set(body.keys()) == {"mode", "live_available", "replay_available", "defenses", "rate_limit_per_min"}
     assert body["mode"] == app.resolve_mode()
 
 
