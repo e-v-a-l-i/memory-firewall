@@ -975,8 +975,13 @@ def _d1_annotation(chunks: list[store.Chunk], nonce: str | None) -> dict | None:
     ]
     return {
         "id": "D1",
-        "name": "spotlighting",
-        "action": "spotlighted",
+        # Named for what it does rather than for the technique. The technique
+        # is known in the literature as spotlighting; that name is kept in
+        # CLAUDE.md §5 and DECISIONS so the prior art stays findable, but it
+        # collided with the UI's own red-border highlight — which is the
+        # "spotlight" a viewer actually sees, and is not this defense.
+        "name": "untrusted_tagging",
+        "action": "tagged",
         "nonce": nonce,
         "trigger_chunks": wrapped,
         "stripped_chunks": stripped,

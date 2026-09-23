@@ -46,7 +46,8 @@ run is poisoned, it just believes what the first one wrote down.
 
 ## The defenses
 
-- **D1 spotlighting** — untrusted chunks are wrapped in `<untrusted-{nonce}>`
+- **D1 untrusted tagging** (*spotlighting*, in the research literature) —
+  untrusted chunks are wrapped in `<untrusted-{nonce}>`
   tags with a per-run random nonce, and tag-shaped text inside them is
   stripped so a closing tag cannot be forged. Probabilistic: it tells the model
   what is data, and the model may still disobey.
@@ -153,7 +154,7 @@ which model serves live traffic.
   measured by eval and reported honestly, scoped to the model tested. D2 and
   D3 are code and are tested deterministically.
 - **In replay mode the defense that fires is whichever one the recorded run
-  reached.** The completions are fixed, so spotlighting cannot change what the
+  reached.** The completions are fixed, so tagging cannot change what the
   model said: S1's defended column is stopped by **D2**, which quarantines the
   fact the model tried to save, rather than by D1.
 - **S3 in replay demonstrates the model refusing, not a defense blocking.**

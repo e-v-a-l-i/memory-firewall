@@ -801,3 +801,23 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
 - **DECISIONS entries keep the name they were written under.** A decision log
   is a record of what was decided when; rewriting its history to match a later
   name would make it a worse record for no gain.
+
+### D-062 D1 is "untrusted tagging"; the technique is still spotlighting
+- **Decision:** the defense is called *untrusted tagging* in the UI, the
+  README and the trace (`defense.name == "untrusted_tagging"`,
+  `action == "tagged"`). CLAUDE.md §5 and this log keep *spotlighting*
+  attached to it as the name the technique has in the literature.
+- **Why:** "spotlighting" collided with the demo's own screen. The UI puts a
+  red border and an "injection source" pill on the injected chunk — that is
+  the spotlight a viewer sees, and it is not this defense. Two different
+  spotlights on one screen, and the visible one was the wrong one. The new
+  label also reads in parallel with "memory gate" and "skill policy", where
+  D1 was the only opaque one of the three.
+- **The identifier moved too**, unlike the service id in D-061. The trace is
+  read by the UI and the scenario matrix, both in this repo, and nothing
+  outside it consumes the format — so the consistency was worth more than the
+  stability. Nothing recorded in `replays/` carries defense names; those hold
+  model completions only (D-038), so no artefact had to be regenerated.
+- **Prior art is preserved deliberately.** A demo that renames a known
+  technique into its own private vocabulary makes itself harder to place, so
+  the literature name stays one line away in the spec.

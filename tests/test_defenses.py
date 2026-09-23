@@ -513,3 +513,37 @@ def test_t8_4_read_only_skill_still_runs_with_d3_on_while_privileged_is_blocked(
     )
 
     assert events[-1]["type"] == "done"
+
+
+def test_d1_annotation_names_itself_consistently():
+    """The trace's defense identifiers are the record format the UI and the
+    scenario matrix both read, and nothing pinned D1's.
+
+    Renamed from `spotlighting` because it collided with the UI's own red
+    border on the injected chunk — the "spotlight" a viewer actually sees is
+    the highlight, not this defense. The technique keeps its literature name
+    in CLAUDE.md §5 and DECISIONS so the prior art stays findable.
+    """
+    chunk = store.Chunk(
+        id="log:evt-1:user_agent", text="do a thing",
+        source="logs.jsonl#evt-1 field=user_agent",
+        trust=store.ATTACKER_CONTROLLABLE, doc_type="log", score=1.0,
+    )
+    annotation = app._d1_annotation([chunk], nonce="deadbeef")
+
+    assert annotation["id"] == "D1"
+    assert annotation["name"] == "untrusted_tagging"
+    assert annotation["action"] == "tagged"
+    # And it must never look like a block: the matrix counts only blocked or
+    # quarantined as a defense stopping something, and D1 annotates every run
+    # it is enabled for.
+    assert annotation["action"] not in {"blocked", "quarantined"}
+
+
+def test_d1_is_not_counted_as_a_block_in_a_real_run():
+    events = app.run_scenario("S1", _gullible(), defenses=D1_ONLY, session_id="d1-name")
+    stopping = [
+        e for e in events
+        if e["defense"] and e["defense"].get("action") in {"blocked", "quarantined"}
+    ]
+    assert not stopping, "D1 annotated a run as if it had stopped something"

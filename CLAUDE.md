@@ -61,7 +61,8 @@ outcome undefended, and primary defense.
 S2 runs as two sequential alerts to show persistence across runs.
 
 ## 5. Defenses (each toggleable per run)
-- **D1 Spotlighting (probabilistic).** Untrusted chunks wrapped in
+- **D1 Untrusted tagging (probabilistic; the technique is called spotlighting
+  in the literature).** Untrusted chunks wrapped in
   `<untrusted-{nonce}>` tags with a per-run random nonce; any tag-like text inside the
   content is stripped so attackers can't forge a closing tag. The system prompt states
   that tagged content is data and never instructions.
