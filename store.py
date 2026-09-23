@@ -71,32 +71,54 @@ class MemoryRecord:
 # --- trust -------------------------------------------------------------------
 
 
-_TRUST_MAP_CACHE: dict[str, set[str]] = {}
+_TRUST_MAP_CACHE: dict[str, dict] = {}
 
 
-def load_trust_map(path: Path | str = TRUST_MAP_PATH) -> set[str]:
-    """Field names an attacker can influence. Everything else is internal.
+def load_trust_rules(path: Path | str = TRUST_MAP_PATH) -> dict:
+    """The trust map: globally untrusted fields, plus per-doc-type additions.
 
-    Cached per path: this is consulted once per chunk on every ingest and once
-    per provenance id on every memory write, and re-reading the file each time
-    made a measurable dent in run time.
+    Cached per path: consulted once per chunk on every ingest and once per
+    provenance id on every memory write.
     """
     key = str(path)
     if key not in _TRUST_MAP_CACHE:
         with open(path, "r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
-        _TRUST_MAP_CACHE[key] = set(raw.get("attacker_controllable") or [])
+        _TRUST_MAP_CACHE[key] = {
+            "global": set(raw.get("attacker_controllable") or []),
+            "by_doc_type": {
+                doc_type: set(fields or [])
+                for doc_type, fields in (raw.get("by_doc_type") or {}).items()
+            },
+        }
     return _TRUST_MAP_CACHE[key]
 
 
-def trust_for_field(field_name: str, untrusted_fields: set[str] | None = None) -> str:
-    """Trust label for a field name.
+def load_trust_map(path: Path | str = TRUST_MAP_PATH) -> set[str]:
+    """Field names an attacker can influence in any document type."""
+    return load_trust_rules(path)["global"]
+
+
+def trust_for_field(
+    field_name: str, untrusted_fields: set[str] | None = None, doc_type: str | None = None
+) -> str:
+    """Trust label for a field of a document.
+
+    Keyed on the document type as well as the field name: the same word means
+    different things in different records. A detection rule writes an alert's
+    `title`; whoever opens a ticket writes the ticket's, and they are exactly
+    the person who writes its `comment`. Found in review — a payload moved
+    from a ticket comment into its title was labelled `internal`, which turned
+    off D1, D2 and D3 at once.
 
     Defaults to `internal` only because the map enumerates what is reachable
     by an attacker; a field added later without a map entry is a known gap,
     not a safe default. Keep the map current when data gains fields.
     """
-    fields = load_trust_map() if untrusted_fields is None else untrusted_fields
+    rules = load_trust_rules()
+    fields = rules["global"] if untrusted_fields is None else set(untrusted_fields)
+    if doc_type:
+        fields = fields | rules["by_doc_type"].get(doc_type, set())
     return ATTACKER_CONTROLLABLE if field_name in fields else INTERNAL
 
 
@@ -114,7 +136,9 @@ def chunk_trust(chunk_id: str, conn: sqlite3.Connection | None = None) -> str:
         row = conn.execute("SELECT trust FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
         return row[0] if row is not None else ATTACKER_CONTROLLABLE
     parts = chunk_id.split(":")
-    return trust_for_field(parts[-1].strip()) if len(parts) >= 2 else ATTACKER_CONTROLLABLE
+    if len(parts) >= 2:
+        return trust_for_field(parts[-1].strip(), doc_type=parts[0].strip())
+    return ATTACKER_CONTROLLABLE
 
 
 def max_trust(chunk_ids, conn: sqlite3.Connection | None = None) -> str:
@@ -192,7 +216,7 @@ def iter_chunk_rows(data_dir: Path | str = DATA_DIR):
                             id=f"{doc_type}:{doc_id}:{name}",
                             text=text,
                             source=f"{path.name}#{doc_id} field={name}",
-                            trust=trust_for_field(name, untrusted_fields),
+                            trust=trust_for_field(name, untrusted_fields, doc_type=doc_type),
                             doc_type=doc_type,
                             score=0.0,
                         ),

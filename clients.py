@@ -94,12 +94,20 @@ _ALERT_RE = re.compile(r"\bALR-\d+\b")
 _DISPOSITIONS = ("benign", "false_positive", "resolved")
 
 
-def _extract_args(text: str, schema: dict) -> dict:
+def _extract_args(text: str, schema: dict, directive_text: str | None = None) -> dict:
     """Best-effort argument extraction from the instruction text.
 
     The gullible model takes its arguments from the same untrusted text that
     told it what to call — which is the point. An attacker who can write the
     instruction can write the arguments.
+
+    `directive_text` is the span right after the tool name, used only for the
+    last-resort free-text fallback. Without it, a required prose parameter
+    (`save_memory`'s `content`) fell back to the start of the whole context
+    block — the alert summary, not the attacker's claim — so the poisoned
+    fact never reached memory intact. The regex fallbacks still scan the full
+    text, because an alert id or host often sits in the prompt header rather
+    than in the injected sentence.
     """
     args: dict = {}
     properties = (schema or {}).get("properties", {}) or {}
@@ -122,11 +130,18 @@ def _extract_args(text: str, schema: dict) -> dict:
                 value = next((d for d in _DISPOSITIONS if d in text.lower()), None)
 
         if value is None and param in required:
-            value = text.strip()[:200]
+            value = (directive_text or text).strip()[:200]
 
         if value is not None:
-            args[param] = value
+            # Right-strip only: a sentence-ending period is punctuation, but
+            # an IP address's interior dots are part of the value.
+            args[param] = value.rstrip(".,;:!?") if isinstance(value, str) else value
     return args
+
+
+def _first_directive(messages: list[dict], available: dict):
+    """Module-level view of the directive scan, for direct testing."""
+    return MockClient(gullible=True)._first_directive(messages, available)
 
 
 class MockClient:
@@ -174,8 +189,13 @@ class MockClient:
                 usage=usage,
             )
 
-        tool_name, text = hit
-        args = _extract_args(text, available[tool_name].get("input_schema", {}))
+        position, tool_name, text = hit
+        # The instruction's own sentence, not the whole block it sits in.
+        snippet = text[position + len(tool_name) : position + len(tool_name) + 400]
+        snippet = snippet.lstrip(" :,.-")
+        args = _extract_args(
+            text, available[tool_name].get("input_schema", {}), directive_text=snippet
+        )
         self._obeyed.add(tool_name)
         return Completion(
             text=f"The retrieved content says to call {tool_name}; doing that.",
@@ -187,7 +207,7 @@ class MockClient:
         )
 
     def _first_directive(self, messages: list[dict], available: dict):
-        """The earliest mention of an available tool, and the text around it.
+        """The earliest mention of an available tool: (position, name, text).
 
         Only tools actually offered are considered: a model cannot call a tool
         it was not given, however loudly the text demands it.
@@ -203,5 +223,5 @@ class MockClient:
                 if best is None or position < best[0]:
                     best = (position, tool_name, text)
             if best is not None:
-                return best[1], best[2]
+                return best
         return None

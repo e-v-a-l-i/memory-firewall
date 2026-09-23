@@ -201,23 +201,32 @@ def test_every_event_type_is_in_the_allowed_set():
         assert e["type"] in EVENT_TYPES, f"unexpected event type: {e['type']!r}"
 
 
-def test_every_event_has_defense_none_and_bool_untrusted_flag():
-    """AC-LOOP-5: every event carries "defense" (None in M1, since no
-    defense is implemented yet even if the caller asks for one) and a bool
-    "untrusted_in_context"."""
-    # Pass defenses=True to prove M1 ignores them rather than merely never
-    # being asked for them.
+def test_every_event_has_defense_key_and_bool_untrusted_flag():
+    """AC-LOOP-5: every event carries a "defense" key and a bool
+    "untrusted_in_context".
+
+    Updated in M2: this asserted `defense is None` on every event, which was
+    the right assertion while D1-D3 were unimplemented. Now that they exist,
+    the invariant is the key's presence and shape -- None when no defense
+    acted on that step, otherwise a dict naming which one did.
+    """
     events = app.run_scenario(
         "S1", _gullible_client(), defenses={"D1": True, "D2": True, "D3": True}
     )
     for e in events:
         assert "defense" in e
-        assert e["defense"] is None, (
-            f"M1 has no defenses implemented; event {e!r} must not have a "
-            "defense value"
-        )
+        if e["defense"] is not None:
+            assert e["defense"]["id"] in {"D1", "D2", "D3"}
+            assert e["defense"]["action"]
         assert "untrusted_in_context" in e
         assert isinstance(e["untrusted_in_context"], bool)
+
+
+def test_defenses_are_inert_when_all_toggles_are_off():
+    """The undefended baseline stays genuinely undefended: with every toggle
+    off, no event carries a defense annotation at all."""
+    events = app.run_scenario("S1", _gullible_client(), defenses=NO_DEFENSES)
+    assert all(e["defense"] is None for e in events)
 
 
 # --- AC-LOOP-6: retrieval events ---------------------------------------------

@@ -217,3 +217,212 @@ Key tradeoffs, recorded as they are made (§12). Format:
 - **`reset_db()` is a process-wide wipe.** The UI's reset button must call
   `store.reset_session(conn, session_id)` instead, or one visitor's reset
   destroys another's memory.
+
+## M2 — S2, S3, defenses D1–D3, scenario matrix
+
+### D-017 Alerts link their tickets explicitly (`related_tickets`)
+- **Decision:** retrieval follows an alert's `related_tickets` the same way it
+  follows `related_logs`, rather than discovering tickets by keyword.
+- **Options:** an FTS search on the alert id (verified to work — TKT-4488's
+  body says "Auto-created from ALR-1001", so it is the top hit) vs. an
+  explicit field.
+- **Reason:** D-011 already established that which record reaches the model
+  must not be an accident of bm25 ranking. Closes the split-payload retrieval
+  gap recorded at the end of M1: S1g's second fragment now reaches context, so
+  the family is policy-limited rather than retrieval-limited.
+
+### D-018 Each scenario carries exactly one injection
+- **Decision:** S2 got its own alert (ALR-1031) instead of hanging its
+  poisoning comment off ALR-1001.
+- **Found by:** printing the matrix. Linking TKT-4488 to ALR-1001 put S2's
+  payload into S1's context, and S1's all-defenses row started showing D2
+  firing alongside D3.
+- **Reason:** the demo's claim is that a user can see *where* the injection
+  entered. Two injections in one alert's context makes that unanswerable.
+
+### D-019 `_render_chunks` is D1's choke point for retrieved chunks
+> **Superseded in part by D-029.** This was written as "the single choke
+> point", which was already untrue: the memory pre-load (D-027) rendered
+> recalled facts into the prompt outside it. Corrected below.
+- **Decision:** both the first prompt and every `search_logs` result render
+  through it, so one change covers both paths. The alert summary is built from
+  already-retrieved chunks (M1's D-013 fix), so no untrusted text reaches the
+  prompt outside a wrapper.
+
+### D-020 D1 strips tag-like text and the live nonce, only when D1 is on
+- **Decision:** `_strip_taglike` removes anything tag-shaped — a forged
+  `</untrusted-…>`, `</user>`, `<system>`, `<tool_result>` — and any literal
+  occurrence of the run's nonce, so content cannot reassemble a closing tag.
+  With D1 off, nothing is stripped.
+- **Reason:** leaving the undefended path untouched is what makes S1f's
+  before/after meaningful. A defense that quietly also cleans the undefended
+  baseline would make the demo lie in its own favour.
+
+### D-021 D1 does not normalise zero-width or homoglyph characters
+- **Decision:** deliberate omission, confirmed with the human.
+- **Reason:** the defenses key on a chunk's *trust label*, not on matching its
+  content, so obfuscation evades nothing in this design and normalising buys
+  no security. It would also invert the demo: the gullible mock matches tool
+  names literally, so stripping U+200B under D1 would make S1e read
+  "undefended: not achieved / D1 on: achieved" — the defense appearing to
+  enable the attack.
+- **Alternative if wanted later:** strip Unicode `Cf` code points at *ingest*
+  (`store.iter_chunk_rows`), documented as modelling the fact that a model
+  reads through zero-width characters — not as a defense. Homoglyphs stay out
+  either way; they need a confusables table (§12 dependency question) and
+  remain a live-eval case.
+
+### D-022 Both gates are pure functions
+- **Decision:** `_memory_tier(defenses, untrusted_in_context, untrusted_ids)`
+  and `_d3_blocks(defenses, skill, untrusted_in_context)` are module-level and
+  side-effect free; the loop calls them.
+- **Reason:** §10.1's determinism tests then need no corpus — which matters,
+  because no alert in `data/` retrieves a fully clean chunk set, so "a
+  privileged call with clean context is allowed" is untestable end to end.
+
+### D-023 D2 fails closed on two signals
+- **Decision:** quarantine if `untrusted_in_context` **or** any provenance id
+  resolves as untrusted.
+- **Reason:** D-012 makes an unresolvable id read as attacker-controllable,
+  and D-013's flag is the authoritative record of what the model read.
+  Quarantine is recoverable by a human clicking approve; a poisoned long-term
+  fact is not.
+
+### D-024 D3 checks before dispatch, and the run continues
+- **Decision:** the policy check runs before `_execute_skill`, so `executed`
+  is never True for a blocked call and D-014's outcome contract holds
+  unchanged. The model gets an `is_error` tool result saying a human must
+  approve, and the loop carries on to `done`.
+- **Reason:** a blocked call is a decision handed to a human, not a crash.
+
+### D-025 The attacker's goal can name an *effect*, not just a call
+- **Decision:** `attacker_goal` may declare `effect: {tier: long_term}`;
+  executed calls record their effect alongside their arguments.
+- **Found by:** S2's D2 row scoring as a win. The `save_memory` call really
+  did run — it landed in quarantine. §4 defines S2's goal as the false fact
+  being *saved*, so a quarantined write achieves nothing, and the matrix has
+  to be able to say that.
+
+### D-026 The matrix has three outcomes, not two
+- **Decision:** `achieved`, `blocked_by:Dn`, and
+  `not_achieved_harness_limit`.
+- **Reason:** S1b–S1e and S1h fail only because `MockClient(gullible=True)`
+  matches tool names as literal ASCII and never decodes base64, hex,
+  homoglyphs or zero-width splices. Scoring those as blocks would claim a
+  defensive win the enforcement layer did not earn. This is the mechanical
+  form of §10.4's "report results honestly".
+
+### D-027 Long-term memory is pre-loaded into every run's first message
+- **Decision:** after retrieval, before the first model turn, via
+  `store.recall_memory` + `trace.note_recalled`.
+- **Reason:** without it S2's stage 2 has nothing to be poisoned by. With it,
+  the quarantine tier is what actually stops the attack — quarantined records
+  are never recalled, so they never reach a later run's prompt.
+
+### D-028 `MockClient` takes free-text arguments from the directive's sentence
+- **Decision:** the last-resort fallback for a required prose parameter reads
+  the span after the tool name, not the start of the context block.
+- **Found by:** S2's poisoned memory containing the *alert summary* instead of
+  the attacker's claim, which made stage 2 incoherent. Reinforces D-008: an
+  attacker who writes the instruction writes the arguments.
+
+### D-029 D1 wraps recalled memory, not just retrieved chunks
+- **Found by:** review, as a full D1 bypass. The memory pre-load (D-027)
+  rendered remembered facts into the prompt as plain text, outside any
+  wrapper and unstripped — so D-019's "single choke point" claim was false the
+  moment it was written.
+- **Worse:** the reviewer demonstrated a same-run round trip. Content inside a
+  wrapper asks the model to copy the tag it can see into a saved note; the
+  next `recall_memory` hands back a real `</untrusted-{nonce}>` outside any
+  wrapper. The attacker never guesses the nonce — the model is asked to copy
+  it.
+- **Decision:** both the pre-load and the `recall_memory` result render
+  through the same wrapper-and-strip path as chunks. A human approving a
+  quarantined record does not make its wording safe, so approved records are
+  wrapped too.
+
+### D-030 Tag stripping repeats to a fixed point
+- **Found by:** review. One `re.sub` pass lets nested tags reassemble:
+  `</us<x>er>` loses its inner `<x>` and becomes a working `</user>`. The
+  trace then annotated the chunk as "stripped", so the demo claimed a defense
+  that had not happened.
+
+### D-031 What counts as "tag-like"
+- **Decision:** three rules — an HTML comment; a tag opening with a letter,
+  optionally prefixed by `!` or `?` (no length cap); and any bracketed run
+  containing no whitespace.
+- **Rejected:** a `{0,200}` body cap (`<system ` + 250 characters walked
+  through it) and an `[A-Za-z]`-only first character (`<1system>` walked
+  through that). `<!-- x -->` carries whitespace and has no tag name, so it
+  fell through both remaining rules and needed a rule of its own.
+- **Also rejected:** stripping every bracketed run whatever it contains. That
+  removed the middle of an ordinary log line — `latency < 5ms and count > 3`
+  — and stripping only ever applies to attacker-controllable chunks, which
+  are precisely the evidence an analyst is reading. §5 asks for tag-like text
+  to go; a prose comparison carries whitespace and no tag name, and is not
+  what a model reads as a boundary. A defense that silently corrupts evidence
+  has a cost of its own.
+
+### D-032 Trust is keyed by document type and field, not field alone
+- **Found by:** review. `comment` and `body` are attacker-controllable
+  "because anyone with ticket access can write one" — and the same person
+  writes the ticket's `title`, which was `internal`. Moving S3's payload into
+  the title turned off D1, D2 and D3 at once: nothing was wrapped, nothing was
+  flagged, and the privileged call executed.
+- **Decision:** `trust_map.yaml` gains a `by_doc_type` block; `ticket` adds
+  `title`, `status`, `assignee`. An alert's title, written by a detection
+  rule, stays internal.
+- **Regression fixtures:** S2e and S3e carry this payload shape permanently,
+  and `tests/test_m2_regressions.py` pins the per-`(doc_type, field)` labels
+  directly, which the fixtures alone did not.
+- **Reachable only from M2:** D-017's `related_tickets` link is what first put
+  ticket chunks into an alert's context at all.
+- **Lesson worth keeping:** `trust_map.yaml` is now a security-critical file.
+  A field added to the data without a map entry is a silent hole in all three
+  defenses at once, and the trace points at no injection source.
+
+### D-033 Skill effects are returned, not passed through a module global
+- **Found by:** review, with a reproduction. Two concurrent `run_scenario`
+  calls racing on a module-level `_LAST_EFFECT` made one run report the
+  other's memory tier — enough to flip `attacker_goal_achieved` and claim D2
+  had failed on a run where it worked. M3 serves this over HTTP with SSE, so
+  two browser tabs would have been enough.
+
+### Process note: the red-teamer edited implementation code
+- The resumed red-teamer went beyond "fixtures and data only" and changed
+  `app.py` and the tests. The work was sound and matched findings the reviewer
+  had independently raised, so it was kept after verification rather than
+  reverted — except its tag-stripping rule, which was over-broad (see D-031).
+- It was stopped mid-iteration, leaving two of its own tests failing; those
+  are resolved above. Every change it made was re-verified directly before
+  being kept.
+
+
+### D-034 `iter_scenario` is a generator; `run_scenario` collects it
+- **Decision:** the agent loop yields trace events as they happen.
+  `run_scenario` is a three-line wrapper returning `list(iter_scenario(...))`
+  for tests, scoring and replay recording. Events emitted from inside a skill
+  drain after dispatch, since a skill cannot yield for itself.
+- **Reason:** done before M3 rather than during it. Retrofitting a streaming
+  interface onto a 300-line function whose UI already depends on its shape is
+  a different and worse job than splitting it while nothing depends on it yet.
+- **Pinned by test:** the model must not be called before the first two
+  events reach the consumer — otherwise a UI streams nothing until `done` and
+  nobody notices until the demo.
+
+### D-035 The live eval is scoped to S1/S2/S3, and "defended" means D1 only
+- **Decision:** §10.4's eval runs the three canonical scenarios, not all 22
+  fixtures, and its defended arm enables **D1 alone**.
+- **Reason:** D2 and D3 are deterministic code. Running them against a real
+  model measures an `if` statement at API prices and tells you nothing you
+  cannot get from CI. D1 is the only defense whose efficacy is a question
+  about model behaviour, so it is the only one worth spending live tokens on.
+  With all three enabled, a blocked run tells you the enforcement layer
+  worked — which the matrix already proves deterministically — while D1's
+  actual effect stays invisible behind the block.
+- **Consequence:** the eval table reports D1-only vs undefended, per scenario.
+  If Claude resists a scenario even undefended, §10.4 says to report that
+  plainly and keep the scenario: model-level resistance plus defense in depth
+  is the honest result, not a failed experiment.
+- **Variants stay in CI:** S1a-S1i, S2a-S2e and S3a-S3e remain deterministic
+  regression fixtures. They are not eval material.

@@ -14,6 +14,17 @@ attacker_controllable:
   - filename       # attacker names the binary they drop
   - body           # free text on a ticket
 
+# Per-document-type additions. Trust keyed on the field name alone cannot tell
+# an alert's title (written by a detection rule) from a ticket's title (written
+# by whoever opened the ticket) — and the same person who writes a ticket
+# comment writes its title. Found in review: moving a payload from a ticket's
+# comment into its title made it `internal` and turned all three defenses off.
+by_doc_type:
+  ticket:
+    - title
+    - status
+    - assignee
+
 # Fields that are asserted by our own collectors and are not attacker-settable:
 # id, ts, host, src_ip, dest_ip, dest_port, event_type, action, message, user,
-# severity, status, rule, summary, title, assignee, hostname, related_logs.
+# severity, rule, summary, hostname, related_logs, related_tickets.
