@@ -406,3 +406,206 @@ class FallbackClient:
             except Exception:  # noqa: BLE001 - any live failure falls back
                 self.fell_back = True
         return self._fallback.complete(**kwargs)
+
+
+# =============================================================================
+# Gemini on Vertex
+# =============================================================================
+#
+# A deliberate deviation from §2, which specifies Claude via
+# `anthropic[vertex]`. This project has no Anthropic partner-model
+# entitlement: every `anthropic-*` bucket in
+# `global_online_prediction_requests_per_base_model` has no effective limit at
+# all, while Google's own buckets are provisioned. `VertexClient` above is
+# unchanged and still tested, so the spec'd path works the moment that
+# entitlement lands — the provider is chosen by env var, not by editing code.
+#
+# What this costs, and it is not small: an eval run against Gemini measures
+# *Gemini's* susceptibility to an injected instruction. It says nothing about
+# Claude. Every artefact that reports those numbers has to say so in its
+# header, not in a footnote.
+
+_GEMINI_FINISH_REASONS = {
+    "STOP": "end_turn",
+    "MAX_TOKENS": "max_tokens",
+    "SAFETY": "end_turn",
+    "RECITATION": "end_turn",
+}
+
+
+def _json_type_to_gemini(json_type: str):
+    from google.genai import types
+
+    return {
+        "string": types.Type.STRING,
+        "integer": types.Type.INTEGER,
+        "number": types.Type.NUMBER,
+        "boolean": types.Type.BOOLEAN,
+        "array": types.Type.ARRAY,
+        "object": types.Type.OBJECT,
+    }.get(str(json_type).lower(), types.Type.STRING)
+
+
+def _schema_to_gemini(input_schema: dict):
+    """Our tool schemas are JSON Schema; Gemini wants its own Schema type."""
+    from google.genai import types
+
+    properties = {}
+    for name, spec in (input_schema.get("properties") or {}).items():
+        spec = spec or {}
+        properties[name] = types.Schema(
+            type=_json_type_to_gemini(spec.get("type", "string")),
+            description=str(spec.get("description", "")) or None,
+        )
+    return types.Schema(
+        type=types.Type.OBJECT,
+        properties=properties or None,
+        required=list(input_schema.get("required") or []) or None,
+    )
+
+
+def _tools_to_gemini(tools: list[dict]):
+    from google.genai import types
+
+    declarations = [
+        types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool.get("description", "")[:4000],
+            parameters=_schema_to_gemini(tool.get("input_schema") or {}),
+        )
+        for tool in tools or []
+    ]
+    return [types.Tool(function_declarations=declarations)] if declarations else None
+
+
+def _messages_to_gemini(messages: list[dict]):
+    """Anthropic block format in, Gemini `contents` out.
+
+    The fiddly part is `tool_result`: Anthropic identifies it by
+    `tool_use_id`, Gemini by the function's *name*, so the ids emitted by
+    earlier assistant turns have to be tracked to translate the replies.
+    """
+    from google.genai import types
+
+    names_by_id: dict[str, str] = {}
+    contents = []
+
+    for message in messages or ():
+        role = "model" if message.get("role") == "assistant" else "user"
+        blocks = message.get("content")
+        if isinstance(blocks, str):
+            contents.append(types.Content(role=role, parts=[types.Part(text=blocks)]))
+            continue
+
+        parts = []
+        for block in blocks or ():
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and block.get("text"):
+                parts.append(types.Part(text=block["text"]))
+            elif kind == "tool_use":
+                names_by_id[block.get("id", "")] = block.get("name", "")
+                parts.append(
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            name=block.get("name", ""), args=dict(block.get("input") or {})
+                        )
+                    )
+                )
+            elif kind == "tool_result":
+                content = block.get("content")
+                if not isinstance(content, str):
+                    content = json.dumps(content, default=str)
+                parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=names_by_id.get(block.get("tool_use_id", ""), "tool"),
+                            response={"result": content},
+                        )
+                    )
+                )
+        if parts:
+            contents.append(types.Content(role=role, parts=parts))
+
+    if not contents:
+        contents = [types.Content(role="user", parts=[types.Part(text="(no content)")])]
+    return contents
+
+
+class GeminiClient:
+    """Gemini through Vertex, behind the same interface as every other client.
+
+    Implements `ClaudeClient` exactly — same `complete(...)` signature, same
+    `Completion` and `ToolCall` shapes — so the agent loop, the defenses and
+    the trace are untouched by which provider serves a run.
+    """
+
+    name = "gemini"
+
+    def __init__(self, *, project=None, region=None, model=None, timeout=60.0, sdk=None):
+        self._model = model or os.environ.get("MODEL_AGENT") or "gemini-2.5-flash"
+        if sdk is None:
+            # Imported lazily so `import app` stays side-effect free (D-005).
+            from google import genai
+
+            sdk = genai.Client(
+                vertexai=True,
+                project=project or os.environ["GCP_PROJECT"],
+                location=region or os.environ.get("VERTEX_REGION", "global"),
+            )
+        self._sdk = sdk
+        self._timeout = timeout
+        self._counter = itertools.count(1)
+
+    def complete(
+        self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int = 1024
+    ) -> Completion:
+        from google.genai import types
+
+        response = self._sdk.models.generate_content(
+            model=self._model,
+            contents=_messages_to_gemini(messages),
+            config=types.GenerateContentConfig(
+                system_instruction=system or None,
+                tools=_tools_to_gemini(tools),
+                max_output_tokens=max_tokens,
+            ),
+        )
+
+        text_parts, tool_calls = [], []
+        candidates = getattr(response, "candidates", None) or []
+        candidate = candidates[0] if candidates else None
+        content = getattr(candidate, "content", None)
+        for part in (getattr(content, "parts", None) or []):
+            call = getattr(part, "function_call", None)
+            if call is not None and getattr(call, "name", None):
+                tool_calls.append(
+                    ToolCall(
+                        # Gemini does not return a call id, but the agent loop
+                        # pairs tool_use with tool_result by one, so it is
+                        # synthesised here rather than left empty.
+                        id=getattr(call, "id", None) or f"gemini-{next(self._counter)}",
+                        name=call.name,
+                        input=dict(getattr(call, "args", None) or {}),
+                    )
+                )
+            elif getattr(part, "text", None):
+                text_parts.append(part.text)
+
+        raw_finish = getattr(candidate, "finish_reason", None)
+        finish = getattr(raw_finish, "name", None) or str(raw_finish or "STOP")
+        # Gemini reports STOP even when it asked for a function call, so the
+        # calls decide the stop reason — the loop keys off `tool_use`.
+        stop_reason = "tool_use" if tool_calls else _GEMINI_FINISH_REASONS.get(finish, "end_turn")
+
+        usage = getattr(response, "usage_metadata", None)
+        return Completion(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            usage={
+                "input_tokens": int(getattr(usage, "prompt_token_count", 0) or 0),
+                "output_tokens": int(getattr(usage, "candidates_token_count", 0) or 0),
+            },
+        )

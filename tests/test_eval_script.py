@@ -106,7 +106,10 @@ def test_a_resisted_scenario_gets_the_honesty_note(evalmod, tmp_path, monkeypatc
     evalmod.main(["--dry-run", "--runs", "3", "--out", str(out), "--scenarios", "S1"])
 
     body = out.read_text()
-    assert evalmod.RESISTED_NOTE in body
+    assert evalmod.resisted_note("MockClient(gullible=True)") in body
+    assert "Claude" not in body, (
+        "the note must name the model that actually ran, not assume Claude"
+    )
 
 
 def test_a_successful_undefended_cell_gets_no_honesty_note(evalmod, tmp_path, monkeypatch):
@@ -117,7 +120,7 @@ def test_a_successful_undefended_cell_gets_no_honesty_note(evalmod, tmp_path, mo
     monkeypatch.setattr(evalmod, "run_cell", all_successes)
     out = tmp_path / "eval.md"
     evalmod.main(["--dry-run", "--runs", "3", "--out", str(out), "--scenarios", "S1"])
-    assert evalmod.RESISTED_NOTE not in out.read_text()
+    assert evalmod.resisted_note("MockClient(gullible=True)") not in out.read_text()
 
 
 def test_d1_not_helping_is_reported_rather_than_hidden(evalmod, tmp_path, monkeypatch):
@@ -153,3 +156,27 @@ def test_recorded_replays_match_the_replay_schema(evalmod, tmp_path, monkeypatch
         assert client.name == "replay"
         completion = client.complete(system="s", messages=[], tools=[])
         assert completion.stop_reason in {"tool_use", "end_turn", "max_tokens"}
+
+
+def test_the_resisted_note_names_the_model_under_test(evalmod):
+    """An eval served by one provider must never attribute its result to
+    another. This exact confusion shipped once: the note was hardcoded to say
+    "Claude" while the runs were served by Gemini."""
+    note = evalmod.resisted_note("gemini:gemini-2.5-flash")
+    assert "gemini-2.5-flash" in note
+    assert "Claude" not in note
+
+
+def test_d1_inversion_note_is_suppressed_when_there_was_nothing_to_reduce(
+    evalmod, tmp_path, monkeypatch
+):
+    """With a 0/N undefended rate, "D1 did not reduce the success rate" is
+    noise that reads as a criticism of the defense."""
+    def never_achieved(scenario_id, defenses, runs, dry_run):
+        return {"stage1": [False] * runs, "stage2": [], "tokens": [10] * runs,
+                "traces": [], "errors": 0}
+
+    monkeypatch.setattr(evalmod, "run_cell", never_achieved)
+    out = tmp_path / "eval.md"
+    evalmod.main(["--dry-run", "--runs", "3", "--out", str(out), "--scenarios", "S1"])
+    assert evalmod.INVERTED_NOTE not in out.read_text()

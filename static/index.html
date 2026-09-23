@@ -226,6 +226,11 @@
     box.appendChild(verdict);
     box.appendChild(el("div", "hint", "alert " + (outcome.alert_status || "?") +
       " · ended: " + (outcome.reason || "?")));
+    if (outcome.reason === "token_cap") {
+      box.appendChild(el("div", "hint",
+        "This session reached its token budget, so the run stopped early. " +
+        "The result above reflects only what ran."));
+    }
     (outcome.actions || []).forEach(function (action) {
       box.appendChild(el("div", "mono", action.tool + " " + JSON.stringify(action.args)));
     });
@@ -308,7 +313,9 @@
       // column and no indication that anything went wrong.
       var trace = byId("trace-" + arm);
       if (!trace.querySelector(".event")) {
-        trace.appendChild(el("p", "empty", "The run could not start — check the mode."));
+        trace.appendChild(el("p", "empty",
+          "The run could not start. Either the selected mode is unavailable, " +
+          "or the rate limit or run limit was reached — wait a moment and try again."));
       }
     };
   }

@@ -38,8 +38,11 @@ ARMS = {"undefended": UNDEFENDED, "D1": D1_ONLY}
 
 #: Printed verbatim when a scenario fails with no defense at all. §10.4 asks
 #: for this to be said plainly rather than quietly dropped.
-RESISTED_NOTE = (
-    "Claude declined this injection with no defense enabled; the scenario is "
+#: §10.4 asks for this to be said plainly. The model is named rather than
+#: assumed: saying "Claude" about a run served by another provider is exactly
+#: the misreading the header exists to prevent.
+RESISTED_TEMPLATE = (
+    "{model} declined this injection with no defense enabled; the scenario is "
     "kept — model-level resistance plus defense in depth is the result, not a "
     "failed experiment."
 )
@@ -48,10 +51,22 @@ INVERTED_NOTE = (
 )
 
 
+def resisted_note(model_label: str) -> str:
+    return RESISTED_TEMPLATE.format(model=f"`{model_label}`")
+
+
 def make_client(dry_run: bool):
     if dry_run:
         return clients.MockClient(gullible=True)
-    return clients.VertexClient()
+    # Whichever provider is configured — the eval measures the model that
+    # actually served the runs, and says which one in its header.
+    return app.live_client()
+
+
+def live_model_label() -> str:
+    provider = app.resolve_live_provider()
+    model = os.environ.get("MODEL_AGENT", "unset")
+    return f"{provider}:{model}"
 
 
 def run_cell(scenario_id: str, defenses: dict, runs: int, dry_run: bool) -> dict:
@@ -186,8 +201,14 @@ def main(argv=None) -> int:
         "# Live eval — attack success rate",
         "",
         f"- Generated: {datetime.now(timezone.utc).isoformat()}",
-        f"- Model: `{'MockClient(gullible=True)' if args.dry_run else os.environ.get('MODEL_AGENT', 'unset')}`",
+        f"- Model: `{'MockClient(gullible=True)' if args.dry_run else live_model_label()}`",
         f"- Runs per cell: {args.runs}",
+        "",
+        f"**Read these as directional, not precise.** At {args.runs} runs per cell a"
+        f" single\nrun moves a rate by {100 / max(args.runs, 1):.0f} percentage points,"
+        " and repeat evals of this suite have\nmoved individual cells by more than that."
+        " A difference of one or two runs between\narms is inside the noise; only a"
+        " consistent gap across scenarios is worth reading as\nan effect.",
         "- Defended arm is **D1 only** (D-035): D2 and D3 are deterministic and",
         "  are proven in the test matrix; with them on, a block would hide D1's",
         "  actual effect on the model.",
@@ -204,11 +225,21 @@ def main(argv=None) -> int:
                 if not flags:
                     continue
                 notes = []
+                model_label = (
+                    "MockClient(gullible=True)" if args.dry_run else live_model_label()
+                )
                 if arm == "undefended" and not any(flags):
-                    notes.append(RESISTED_NOTE)
+                    notes.append(resisted_note(model_label))
                 if arm == "D1":
                     undefended_flags = cells[(scenario_id, "undefended")][stage_key]
-                    if undefended_flags and sum(flags) >= sum(undefended_flags):
+                    # Only meaningful when there was something to reduce: with
+                    # a 0/N undefended rate, "D1 did not reduce it" is noise
+                    # that reads as a criticism of the defense.
+                    if (
+                        undefended_flags
+                        and any(undefended_flags)
+                        and sum(flags) >= sum(undefended_flags)
+                    ):
                         notes.append(INVERTED_NOTE)
                 if cell["errors"]:
                     notes.append(f"{cell['errors']} run(s) errored.")
@@ -224,9 +255,28 @@ def main(argv=None) -> int:
             "\n> **These numbers are not a live eval.** They were produced with "
             "`MockClient(gullible=True)`,\n> a model scripted to follow any "
             "instruction it can read, so every cell reports the\n> enforcement "
-            "layer rather than model behaviour. Vertex quota for Claude was not "
-            "available\n> when this ran. Re-run without `--dry-run` once quota is "
-            "granted to replace this table.\n",
+            "layer rather than model behaviour. Re-run without `--dry-run` to "
+            "replace this table.\n",
+        )
+    elif app.resolve_live_provider() != "claude":
+        # The eval measures whether the model under test follows an injected
+        # instruction. Run against Gemini, it describes Gemini. Saying so in
+        # the header rather than a footnote is the whole of §10.4's honesty
+        # requirement — a reader who skims must not come away thinking these
+        # are Claude numbers.
+        lines.insert(
+            1,
+            f"\n> **These numbers describe {live_model_label()}, not Claude.** This "
+            "project has no\n> Anthropic partner-model entitlement on Vertex (every "
+            "`anthropic-*` quota bucket has\n> no effective limit), so the live runs "
+            "were served by Google's model instead.\n>\n> An injection eval measures "
+            "how *this* model responds to instructions hidden in\n> retrieved content. "
+            "Claude may behave differently, better or worse — nothing here\n> is "
+            "evidence either way. **D1's measured efficacy below is a claim about "
+            f"{live_model_label()}\n> alone.**\n>\n> Unaffected by the provider: D2 "
+            "and D3 are deterministic code, and the whole\n> 22-scenario matrix runs "
+            "on `MockClient`, so no CI claim depends on which model\n> serves live "
+            "traffic.\n",
         )
 
     if args.record:

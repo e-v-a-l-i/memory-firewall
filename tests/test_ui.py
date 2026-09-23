@@ -121,3 +121,32 @@ def test_no_html_injection_sinks(sink):
 def test_rendered_values_go_through_textcontent():
     assert "textContent" in HTML
     assert HTML.count("createElement") >= 1
+
+
+# =============================================================================
+# T5 -- the UI surfaces both M4 guardrails (CLAUDE.md §7, §10.3)
+# =============================================================================
+
+
+def test_onerror_copy_names_a_rate_limit_cause_as_well_as_the_mode():
+    """T5: today `source.onerror` says only "check the mode" -- a 429 from
+    the new per-IP rate limit (or the concurrent-run cap) reads identically
+    to a misconfigured MODE, with nothing telling the visitor which one
+    happened. The copy must name a rate/limit cause too."""
+    script = HTML.split("<script")[1]
+    assert "source.onerror" in script, "no source.onerror handler found"
+    onerror_block = script.split("source.onerror", 1)[1].split("};", 1)[0]
+    assert re.search(r"rate|limit", onerror_block, re.I), (
+        "onerror copy does not mention a rate/limit cause"
+    )
+    assert re.search(r"mode", onerror_block, re.I), (
+        "onerror copy dropped the existing mode-check wording"
+    )
+
+
+def test_script_has_a_token_cap_branch():
+    """T5: a run stopped by the per-session token cap (§7) must be a
+    distinct, visible state in the trace, not indistinguishable from an
+    ordinary max_steps/end_turn stop."""
+    script = HTML.split("<script")[1]
+    assert "token_cap" in script, "no token_cap handling found in the inline script"

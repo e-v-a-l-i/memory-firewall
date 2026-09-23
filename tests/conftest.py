@@ -116,3 +116,28 @@ def _isolate_app_db():
     app_module.reset_db()
     yield
     app_module.reset_db()
+
+
+@pytest.fixture(autouse=True)
+def _reset_guardrail_state():
+    """Drop the M4 guardrails' process-wide state around every test.
+
+    Same reasoning as `_isolate_app_db` above: the rate limiter's per-key
+    counters, the run-concurrency slot count, and the per-session token
+    spend ledger all live outside the per-test DB, so a test that trips one
+    of them would otherwise poison every test that runs after it. Looked up
+    by name and called only if present -- this fixture is added ahead of the
+    M4 implementation (tests/test_guardrails.py), so `app` won't expose any
+    of these yet; once it does, all three exist and all three get reset.
+    """
+    import app as app_module
+
+    def _reset():
+        for name in ("reset_rate_limits", "reset_run_slots", "reset_token_budgets"):
+            fn = getattr(app_module, name, None)
+            if callable(fn):
+                fn()
+
+    _reset()
+    yield
+    _reset()

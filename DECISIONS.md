@@ -553,3 +553,181 @@ Key tradeoffs, recorded as they are made (§12). Format:
 - §7's guardrails (rate limit, token cap) are M4 and absent. `/api/run` has
   no per-IP cap on concurrent streams today, and each one runs a full
   scenario on the threadpool.
+
+## M4 — guardrails, README, smoke test, final deploy
+
+### D-047 The rate limit reads `X-Forwarded-For` from the right
+- **Decision:** `client_key` takes `entries[-1 - TRUSTED_PROXY_HOPS]` and
+  parses it with `ipaddress.ip_address`; `TRUSTED_PROXY_HOPS` defaults to 0
+  (bare Cloud Run), 1 behind an external load balancer.
+- **Options:** `request.client.host` — on Cloud Run that is the Google Front
+  End, so every visitor is throttled as one client. Leftmost XFF entry — that
+  is whatever the client sent, so an attacker rotates it for unlimited
+  requests, or forges a victim's address to get the victim blocked. Rightmost
+  minus hops — Google's front end *appends* what it observed, so trust flows
+  from the right.
+- **The `ipaddress` parse is not cosmetic:** it stops an attacker-chosen
+  string becoming a dictionary key on a single-instance service.
+- **This is the one guardrail behaviour that cannot be verified locally.**
+  Directly against uvicorn nothing appends, so a client-supplied header *is*
+  the rightmost entry and is trusted by design. `scripts/smoke.py` asserts it
+  against the deployed URL and prints an explicit SKIP against localhost
+  rather than asserting something that cannot fail there.
+
+### D-048 A fixed window, replaced wholesale each minute
+- **Options:** a per-key sliding-window deque; a fixed window discarded each
+  minute.
+- **Reason:** the deque needs eviction logic to stay bounded; the fixed window
+  is bounded by construction, with a hard cap on distinct keys per window on
+  top.
+- **Accepted cost:** a burst straddling a minute boundary can briefly achieve
+  twice the nominal rate. For a demo guardrail that is the right trade against
+  eviction code that has to be correct under a threadpool.
+
+### D-049 A bad limit value falls back to the default, not to "disabled"
+- **Decision:** an unparseable or negative `RATE_LIMIT_PER_MIN` resolves to
+  600; only an explicit `0` disables the limit.
+- **Contrast with D-004**, where an unrecognised `MODE` degrades to `mock`.
+  There, degrading means *less* capability. Here, degrading to `0` would mean
+  removing a guardrail, so "fail safe" points the other way. The direction of
+  safety is a property of the setting, not a house style.
+- **Human-set value:** 600/min (≈150 runs), chosen so a room behind one NAT
+  does not throttle itself.
+
+### D-050 The token cap is checked before the model call, and ends the run normally
+- **Decision:** the check runs at the top of each turn, before
+  `client.complete()`, and on trip the loop breaks to the ordinary `done`
+  emission with `reason: "token_cap"` and `detail: {"cap", "used"}`.
+- **Options:** check after the call (lets a run overspend by a whole turn);
+  raise and let the error path terminate the stream.
+- **Reason:** §10.3 says a cap "stops a session cleanly". The error path was
+  built for a run that *failed*; a capped run did not fail, and the outcome it
+  reports — including `attacker_goal_achieved` — stays honest about what
+  happened before the stop.
+
+### D-051 Spend is per base session, survives reset, and is unlimited by default
+- **Decision:** keyed on `sid.split("#")[0]`, so both arms share one budget;
+  `SESSION_TOKEN_CAP` defaults to `0` (disabled); `POST /api/reset` clears
+  memory but not spend.
+- **Reasons:** keying on the arm-scoped id would silently make the cap twice
+  what it says. A cap a visitor can clear with a button is not a cap. And a
+  cap that truncates a demo unexpectedly is worse than no cap while there is
+  no live spend to protect against.
+- **Acknowledged hole:** clearing the cookie buys a fresh budget. That is why
+  the IP rate limit exists alongside it — neither is the guardrail on its own.
+
+### D-052 Guardrail state is in-process, which makes `--max-instances 1` load-bearing
+- The counter and the budget map are module-level dicts under locks. §7's own
+  justification for `--max-instances 1` ("so in-memory sessions stay
+  consistent") is the licence, and §12 rules out Redis.
+- **Consequence worth stating plainly:** raising `--max-instances` above 1
+  silently divides both guardrails by the instance count. The flag is now a
+  security control, not just a session-continuity one, and the README says so.
+
+### D-053 Recorded replays now carry real token usage
+- **Bug found in planning:** `scripts/eval.py` reads `usage` from `model`
+  trace events, and `iter_scenario` never put it there, so all eight committed
+  recordings reported zero tokens — a comment in that code claimed to be
+  fixing exactly the problem it left in place. A token cap could therefore
+  never trip in replay mode.
+- **Fix:** `model` events carry the turn's usage, and the recordings were
+  refreshed (4,708–6,411 tokens per run).
+
+### D-054 Where M4 leaves §11
+- **Met:** all tests pass on `MockClient` with no network (451); every
+  scenario shows a hijack undefended and a block with a defense, in replay;
+  DECISIONS.md records the tradeoffs; README explains the demo in under a
+  minute; the deployed URL works from a fresh browser.
+- **Not met, and why:** the live-mode half of "each scenario ... in live mode"
+  and the substance of "eval table committed". Vertex has zero Claude quota on
+  this project (D-041), re-confirmed during M4 with the same 429. The
+  committed table measures the enforcement layer, not Claude, and both
+  `replays/eval.md` and the README say so in their own words. Re-running
+  `scripts/eval.py` without `--dry-run` replaces both and nothing else.
+
+### D-055 The service account was not narrowed
+- **Deferred deliberately.** The Cloud Run service still runs as the default
+  compute SA with `roles/editor`, broader than §7's `roles/aiplatform.user`.
+- **Reason:** with zero quota the service makes no Vertex calls at all, so the
+  breadth is entirely unexercised, and re-deploying with a new identity risks
+  the milestone's demoable result — a working deploy — for no present gain.
+- **This becomes mandatory the moment `MODE=live` is deployed.** It is the
+  first item to do when quota lands, before the eval re-run.
+
+### D-056 `--min-instances 1` is an operator action, not a deploy flag
+- §7 scopes it to the demo window. Putting it in the committed deploy command
+  would bill a warm instance indefinitely, so both commands are in the README
+  instead.
+
+### D-057 The live model is Gemini, not Claude (a §2 deviation)
+- **Situation:** this project has no Anthropic partner-model entitlement on
+  Vertex. Every `anthropic-*` bucket in
+  `global_online_prediction_requests_per_base_model` has no effective limit at
+  all — Opus 4.1/4.5/4.6/4.7, Sonnet 4.5/4.6, Haiku 4.5, claude-3-7-sonnet,
+  claude-3-5-sonnet-v2 — while Google's own buckets are provisioned at 600.
+  That is a missing entitlement, not a rate limit, and not resolvable on this
+  project's timescale.
+- **Verified before porting**, per instruction: a real `generateContent` call
+  returned 200 for `gemini-2.5-pro`, `gemini-2.5-flash` and
+  `gemini-2.5-flash-lite`. Gemini 3.x is **not** available here, so the ids
+  were probed rather than assumed. A control request to the Anthropic
+  publisher through the identical URL shape returned the 429 quota error,
+  which is what makes this a provider entitlement difference rather than a
+  client bug.
+- **Decision:** `clients.GeminiClient` implements the existing `ClaudeClient`
+  protocol exactly — same `complete(system, messages, tools, max_tokens)`,
+  same `Completion` and `ToolCall` shapes — and translates both ways:
+  Anthropic block messages to Gemini `contents`/`parts`, our tool schemas to
+  `FunctionDeclaration`s, and `functionCall` responses back to `ToolCall`.
+  `VertexClient` is untouched and still tested, and the provider is chosen by
+  `LIVE_PROVIDER`, never by editing code. The default stays `claude`, so the
+  spec'd path is one env var away.
+- **Two translation details that would have failed quietly:**
+  Gemini returns `finish_reason: STOP` even when it asked for a function call,
+  so the calls decide the stop reason — reading `finish_reason` literally
+  would end every run after one turn. And Gemini returns no call id, while the
+  agent loop pairs `tool_use` with `tool_result` by one, so ids are
+  synthesised and asserted unique.
+- **New dependency:** `google-genai==2.25.0`, human-approved under §12, pinned
+  like the rest and in the runtime manifest because the deployed service needs
+  it.
+
+### D-058 What a Gemini eval does and does not claim
+- **The eval measures whether the model under test follows an instruction
+  hidden in retrieved content. Run against Gemini, it describes Gemini.**
+  Claude may behave differently, better or worse; nothing in the committed
+  table is evidence either way, and D1's measured efficacy is a claim about
+  the model that was actually tested.
+- This is stated in the **header** of `replays/eval.md` and in a top-level
+  README section, not in a footnote — a reader who skims must not come away
+  believing these are Claude numbers (§10.4).
+- **Unaffected:** D2 and D3 are deterministic code, and all 22 scenarios in
+  the CI matrix run on `MockClient`. No test claim depends on which provider
+  serves live traffic, so the enforcement results stand unchanged.
+- Replays are now recorded from real Gemini runs rather than synthesised from
+  the mock, which is what §11 actually asks of the replay path.
+
+### D-059 Eval results at n=3 did not replicate, and the table says so
+- **What happened:** two consecutive 3-run evals of the same suite against the
+  same model disagreed materially. S1 undefended moved 3/3 → 2/3, S1 with D1
+  moved 1/3 → 2/3, and S3 undefended moved 0/3 → 2/3. On the first table I
+  reported "D1 cut the attack rate from 100% to 33%"; the second run shows
+  2/3 against 2/3, so that claim did not survive its own re-run.
+- **Decision:** the eval runs 10 per cell, and `replays/eval.md` carries a
+  sample-size caveat in its header stating how much one run moves a rate and
+  that a one- or two-run gap between arms is inside the noise.
+- **At n=10 the picture is stable and the direction is consistent:** S1 5/10
+  undefended against 2/10 with D1; S2 9/10 → 6/10 at stage 1 and 3/10 → 1/10
+  at stage 2. Spotlighting lowers the rate on every scenario where the model
+  was susceptible at all — which is a directional claim the n=3 tables could
+  not support, and is still not a precise one.
+- **S3 across three evals:** 0/3, 2/3, 0/10 undefended. The middle result is
+  why the caveat exists; on the larger sample the model consistently refuses
+  to un-isolate a contained host on the strength of a pasted advisory.
+- **Why this matters more here than in a normal benchmark:** the whole point
+  of §10's principle is that D1 is *probabilistic*. A table that looks precise
+  invites exactly the over-reading the principle warns about, and a defense
+  whose measured effect swings by 33 points between identical runs cannot be
+  summarised by a single number without saying so.
+- **Unchanged:** D2 and D3 are deterministic and are proven in CI. None of
+  this touches them.
