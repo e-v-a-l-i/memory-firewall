@@ -1,4 +1,4 @@
-# Memory Firewall
+# Project Injection Firewall
 
 A SOC triage agent with retrieval, memory and skills — and three prompt
 injections that turn it against the alert it is investigating. Run each attack
@@ -109,6 +109,11 @@ gcloud run deploy memory-firewall --source . --region us-central1 \
 
 `--max-instances 1` is load-bearing: sessions, the rate limiter and the token
 budget are all in memory, so a second instance silently halves both guardrails.
+
+The Cloud Run service is still called `memory-firewall`, which was the
+project's earlier name. Renaming the service would issue a new URL and break
+every link already shared, so the id stays and only the name a reader sees
+changed.
 
 Warm the service for a demo, then let it scale back down afterwards:
 

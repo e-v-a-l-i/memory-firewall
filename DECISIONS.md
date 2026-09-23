@@ -1,4 +1,4 @@
-# Memory Firewall — decision log
+# Project Injection Firewall — decision log
 
 Key tradeoffs, recorded as they are made (§12). Format:
 
@@ -782,3 +782,22 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
   unsafe direction for the only provider that spends anything.
 - **No timeout was configured on live Gemini calls**, so §7's "errors or times
   out" fallback had no timeout half for the provider actually serving traffic.
+
+### D-061 Renamed to Project Injection Firewall
+- **Decision:** the project is *Project Injection Firewall*. The rename covers
+  everything a reader meets — README, the page title and heading, the spec
+  heading, the subagent briefs — and stops there.
+- **Why the old name was wrong:** "Memory Firewall" named D2, one defense of
+  three. S1 is a retrieval hijack and S3 is privileged-skill abuse; neither
+  touches memory. "Firewall" also imported a perimeter metaphor that does not
+  fit a context window, where there is no inside and outside — only text of
+  different provenance sitting in the same prompt. The new name qualifies the
+  *threat* rather than a single countermeasure, so all three scenarios sit
+  under it and a fourth defense would not outdate it.
+- **What deliberately did not change:** the Cloud Run service id
+  (`memory-firewall`), the live URL, and the on-disk database filename.
+  Renaming the service issues a new URL and kills every link already shared —
+  a cost paid by other people, for a tidiness only we would notice.
+- **DECISIONS entries keep the name they were written under.** A decision log
+  is a record of what was decided when; rewriting its history to match a later
+  name would make it a worse record for no gain.
