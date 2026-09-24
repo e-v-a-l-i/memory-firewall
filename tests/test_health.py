@@ -10,7 +10,7 @@ as given in the approved M0 task list:
         {mock, replay, live}, version a non-empty string.
   AC3 - mode defaults to "mock" with no MODE env var; MODE=replay ->
         mode == "replay".
-  AC4 - GET / -> 200, text/html, body contains "Project Injection Firewall".
+  AC4 - GET / -> 200, text/html, body contains "Memory Firewall".
   AC5 - GET /does-not-exist -> 404.
   AC6 - Procfile exists at repo root with the exact required content.
 
@@ -246,11 +246,11 @@ def test_health_mode_is_replay_when_mode_env_is_replay():
 
 
 def test_index_serves_html_containing_title(client):
-    """AC4: GET / -> 200, text/html, body contains "Project Injection Firewall"."""
+    """AC4: GET / -> 200, text/html, body contains "Memory Firewall"."""
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers.get("content-type", "").startswith("text/html")
-    assert "Project Injection Firewall" in r.text
+    assert "Memory Firewall" in r.text
 
 
 # --- AC5 -----------------------------------------------------------------

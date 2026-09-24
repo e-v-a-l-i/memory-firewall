@@ -1,4 +1,4 @@
-# Postmortem — building Project Injection Firewall
+# Postmortem — building Memory Firewall
 
 A demo about prompt injection, built in five milestones with an agentic SDLC:
 a planner, a test engineer, a red teamer and a reviewer, with a human approval

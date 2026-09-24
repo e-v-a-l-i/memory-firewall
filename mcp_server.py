@@ -132,7 +132,7 @@ class Session:
 SESSION = Session()
 server = MCPServer(
     name="injection-firewall",
-    title="Project Injection Firewall",
+    title="Memory Firewall",
     instructions=SERVER_INSTRUCTIONS,
     version="0.1.0",
 )

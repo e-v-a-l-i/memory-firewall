@@ -1,4 +1,4 @@
-# Project Injection Firewall — Spec
+# Memory Firewall — Spec
 
 A demo of prompt-injection attacks on a SOC triage agent that uses RAG, memory, and
 skills, and of layered defenses against them. Users run each attack with defenses off,

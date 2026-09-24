@@ -1,4 +1,4 @@
-# Project Injection Firewall
+# Memory Firewall
 
 A SOC triage agent with retrieval, memory and skills — and three prompt
 injections that turn it against the alert it is investigating. Run each attack

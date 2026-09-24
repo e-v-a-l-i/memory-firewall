@@ -1,4 +1,4 @@
-"""Project Injection Firewall — FastAPI application.
+"""Memory Firewall — FastAPI application.
 
 M0 scope: the skeleton only. `/health` reports liveness and the resolved run
 mode; `/` serves the static placeholder page. The agent loop, retrieval,
@@ -59,7 +59,7 @@ def resolve_mode(raw: str | None = None) -> str:
 #: approve and reject routes, a public schema hands an attacker the tool
 #: surface for free. Nothing in the demo needs it.
 app = FastAPI(
-    title="Project Injection Firewall",
+    title="Memory Firewall",
     version=VERSION,
     docs_url=None,
     redoc_url=None,

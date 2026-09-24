@@ -1,4 +1,4 @@
-# Project Injection Firewall — decision log
+# Memory Firewall — decision log
 
 Key tradeoffs, recorded as they are made (§12). Format:
 
@@ -944,3 +944,15 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
   dies on connect is the failure a client meets first.
 - **New dependency:** `mcp==2.2.0`, human-approved, pinned. Note FastMCP is
   `MCPServer` in 2.x; v1 examples do not run against it.
+
+### D-071 Reverted to Memory Firewall
+- **Decision:** the project is *Memory Firewall* again. Reverts D-061 across
+  everything a reader meets — README, page title and heading, spec heading,
+  postmortem title, subagent briefs.
+- **Unchanged:** D1 is still *untrusted tagging* (D-062). That was a separate
+  decision about a defense's label, made for a separate reason — the old name
+  collided with the UI's own red-border highlight — and reverting the project
+  name does not disturb it.
+- **D-061 stays in this log.** A decision that was made, applied and then
+  reversed is a record of what happened; deleting it would leave the entries
+  around it referring to a name that appears nowhere.
