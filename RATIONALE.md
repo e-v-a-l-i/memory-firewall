@@ -39,9 +39,11 @@ Four cases, chosen so each teaches something different:
   the *next* alert on that host is dismissed because of it. Nothing in the
   second run is poisoned. It just believes what the first run wrote down.
 - **S4 — the cost.** No attacker at all. An authorised scan that should be
-  closed, and D3 refuses it. Across this corpus, **24 of 24 alerts retrieve
+  closed, and D3 refuses it. Across this corpus, **25 of 26 alerts retrieve
   at least one attacker-controllable chunk**, so D3 does not distinguish an
-  attacked run from a normal one: it blocks every privileged action, always.
+  attacked run from a normal one: it blocks essentially every privileged
+  action. The one alert it leaves alone is S5's — the one where the attack
+  succeeds, because the label is wrong.
 - **S5 — the label was wrong.** The same payload moved into a field the trust
   map calls internal. It succeeds with every defense enabled — not because
   one was bypassed, but because none engaged.

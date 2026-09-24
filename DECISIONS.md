@@ -861,10 +861,12 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
 - **Why the demo needed it:** every other case was "the agent should have
   refused", so the demo only ever showed the defenses being right. The first
   question a security reviewer asks is what a control breaks, and the answer
-  was sitting unmeasured in the corpus: **24 of 24 alerts retrieve at least
-  one attacker-controllable chunk, and none retrieve a clean context.** D3 as
-  implemented is therefore not "block privileged actions when under attack" —
-  it is "block privileged actions". An agent with D3 on can never close an
+  was sitting unmeasured in the corpus: **25 of 26 alerts retrieve at least
+  one attacker-controllable chunk.** D3 as implemented is therefore not "block
+  privileged actions when under attack" — it is "block privileged actions".
+  (First measured as 24 of 24; adding S4's and S5's alerts moved it. The only
+  alert with a clean context is S5's, because its injection sits in a
+  mislabelled field — so the one case D3 ignores is the one that gets through.) An agent with D3 on can never close an
   alert or return a host to the network on its own.
 - **The instruction to act comes from trusted content** (the alert summary,
   written by our collector) rather than from a ticket comment. That sharpens

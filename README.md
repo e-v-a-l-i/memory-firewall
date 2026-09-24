@@ -45,10 +45,11 @@ Each column is one agent run, streamed step by step as it happens.
 S2 runs as two alerts. The damage happens between them: nothing in the second
 run is poisoned, it just believes what the first one wrote down.
 
-S4 has no attacker in it. Measured across this corpus, **24 of 24 alerts
-retrieve at least one attacker-controllable chunk and none retrieve a clean
-context**, so D3 does not distinguish an attacked run from an ordinary one —
-it blocks every privileged action, always. An agent running with D3 on can
+S4 has no attacker in it. Measured across this corpus, **25 of 26 alerts
+retrieve at least one attacker-controllable chunk**, so D3 does not
+distinguish an attacked run from an ordinary one — it blocks essentially every
+privileged action. The lone exception is S5's alert, and only because that
+injection hides in a field the trust map calls internal. An agent running with D3 on can
 never close an alert on its own, however obviously correct that is.
 
 S5 succeeds with every defense enabled, and not because one was bypassed:
