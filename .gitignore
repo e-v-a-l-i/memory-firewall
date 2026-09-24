@@ -12,3 +12,7 @@ venv/
 *.sqlite3
 .DS_Store
 .pytest_cache/
+
+# Local dev-server config for the in-app browser pane. Useful on this laptop,
+# noise in a public repo, and already excluded from the deployed image.
+.claude/launch.json

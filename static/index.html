@@ -121,18 +121,27 @@
     <div class="row spread">
       <h1>Memory Firewall</h1>
       <div class="row">
-        <span class="badge" id="mode-badge">mode …</span>
         <select id="mode-select" aria-label="Run mode">
-          <option value="mock">mock</option>
           <option value="replay">replay</option>
+          <option value="mock">mock</option>
           <option value="live">live</option>
         </select>
+        <span class="badge" id="mode-badge">…</span>
         <button id="reset">Reset session</button>
       </div>
     </div>
     <p>
       Prompt injection against a SOC triage agent, run twice side by side.
       The left column has no defenses; the right has the ones you pick.
+    </p>
+    <p class="hint">
+      <strong>replay</strong> re-plays a real model run recorded earlier — what the
+      model said comes off disk, and the defenses genuinely re-execute on top of it,
+      so the toggles still work. <strong>mock</strong> substitutes a model scripted to
+      obey any instruction it reads, which makes every run identical.
+      <strong>live</strong> calls the model now, and it will not agree with itself
+      every time: these attacks land on some runs and not others, which is the point
+      of measuring them in <code>replays/eval.md</code> rather than asserting them.
     </p>
   </header>
 
@@ -517,13 +526,24 @@
     fetch("/api/config", { credentials: "same-origin" })
       .then(function (r) { return r.json(); })
       .then(function (config) {
-        byId("mode-badge").textContent = "mode: " + config.mode;
-        byId("mode-select").value = config.mode;
-        var liveOption = byId("mode-select").querySelector('option[value="live"]');
+        var select = byId("mode-select");
+        var liveOption = select.querySelector('option[value="live"]');
         if (liveOption && !config.live_available) {
           liveOption.disabled = true;
           liveOption.textContent = "live (unavailable)";
         }
+        var replayOption = select.querySelector('option[value="replay"]');
+        if (replayOption && !config.replay_available) {
+          replayOption.disabled = true;
+          replayOption.textContent = "replay (no recordings)";
+        }
+        // Prefer the recorded real runs. The service default (config.mode) is
+        // what an *unspecified* run falls back to, which is not the same
+        // question as what this page should do, and showing it as a status
+        // badge beside a dropdown set to something else said the demo was
+        // doing one thing while it did another.
+        select.value = config.replay_available ? "replay" : config.mode;
+        describeMode();
       });
 
     fetch("/api/scenarios", { credentials: "same-origin" })
@@ -533,7 +553,8 @@
         clear(select);
         list.forEach(function (scenario) {
           scenarios[scenario.id] = scenario;
-          var option = el("option", null, scenario.id + " — " + scenario.name);
+          var option = el("option", null,
+                          (scenario.label || scenario.id) + " — " + scenario.name);
           option.value = scenario.id;
           select.appendChild(option);
         });
@@ -541,6 +562,7 @@
       });
 
     byId("scenario").onchange = showNote;
+    byId("mode-select").onchange = describeMode;
     byId("run").onclick = run;
     byId("reset").onclick = function () {
       closeStreams();
@@ -648,7 +670,9 @@
     var select = byId("scenario");
     select.value = entry.id;
     showNote();
-    showCaption(entry.id + " — setting up", entry.pre);
+    var label = (scenarios[entry.id] || {}).label || entry.id;
+    autoplayState.label = label;
+    showCaption(label + " — setting up", entry.pre);
     window.scrollTo({ top: 0, behavior: "smooth" });
 
     autoplayState.finished = {};
@@ -661,7 +685,7 @@
         // then the verdict it produced.
         revealInjection();
         setTimeout(function () {
-          showCaption(entry.id + " — what just happened", entry.post);
+          showCaption(autoplayState.label + " — what just happened", entry.post);
           revealVerdicts();
         }, 3000);
         setTimeout(function () {
@@ -676,20 +700,51 @@
   function startAutoplay() {
     document.body.classList.add("autoplay");
     autoplayState = { index: 0, finished: {} };
-    // Mock mode is deterministic, so a recording is identical every take.
-    byId("mode-select").value = "mock";
+    // The recorded real runs, so a hands-free capture is a capture of the
+    // model actually doing this rather than of a mock scripted to. They are
+    // fixed files, so the take is repeatable either way; mock is the fallback
+    // only if the recordings are missing.
+    var select = byId("mode-select");
+    var replayOption = select.querySelector('option[value="replay"]');
+    select.value = (replayOption && !replayOption.disabled) ? "replay" : "mock";
+    describeMode();
     ["d1", "d2", "d3"].forEach(function (id) { byId(id).checked = true; });
     byId("defended-label").textContent = defendedLabel();
-    showCaption("Starting", "Hands-free run of all four scenarios.");
+    showCaption("Starting", "Four cases, hands-free. Every run below is a real " +
+      "model run, recorded earlier — the defenses are executing live on top of it.");
     setTimeout(autoplayNext, 2500);
+  }
+
+  var MODE_COPY = {
+    replay: "recorded real run",
+    mock: "scripted model",
+    live: "calling the model now"
+  };
+
+  function describeMode() {
+    var mode = byId("mode-select").value;
+    byId("mode-badge").textContent = MODE_COPY[mode] || mode;
   }
 
   function showNote() {
     var scenario = scenarios[byId("scenario").value];
     if (!scenario) return;
-    byId("scenario-note").textContent =
-      "Primary defense " + scenario.primary_defense + " · injection in " +
-      (scenario.injection || {}).location;
+    var where = (scenario.injection || {}).location;
+    var note;
+    if (scenario.kind === "legitimate") {
+      note = "No attacker in this one. Closing the alert is the correct answer — " +
+             "watch the right-hand column refuse it anyway.";
+    } else if (!scenario.primary_defense || scenario.primary_defense === "none") {
+      note = "Injected into " + where + " — a field the trust map calls internal, " +
+             "so no defense ever engages. Both columns are expected to go red.";
+    } else {
+      note = "Injected into " + where + " · primary defense " +
+             scenario.primary_defense;
+    }
+    if (scenario.stages > 1) {
+      note += " · runs as two alerts in sequence";
+    }
+    byId("scenario-note").textContent = note;
   }
 
   boot();

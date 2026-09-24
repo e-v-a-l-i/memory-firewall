@@ -195,3 +195,20 @@ def test_the_outcome_separates_consequential_actions_from_lookups():
     assert "a.privileged" in script
     assert "read-only call" in script
     assert "No privileged action was taken" in script
+
+
+def test_the_page_is_revalidated_rather_than_served_from_cache():
+    """A cached copy of `/` is a cached build of the whole demo.
+
+    It fails silently: the page renders and runs while showing a defense
+    name, a scenario list or a default mode from a previous deploy. It
+    happened three times during this project, twice while writing the
+    recording run sheet and once while verifying a deploy.
+    """
+    client = TestClient(app.app)
+    response = client.get("/")
+    assert response.status_code == 200
+    cache_control = response.headers.get("cache-control", "")
+    assert "no-cache" in cache_control, (
+        f"/ is cacheable without revalidation: {cache_control!r}"
+    )

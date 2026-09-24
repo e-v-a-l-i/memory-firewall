@@ -114,7 +114,9 @@ divergence the moment one appeared.
   Gemini 2.5 Flash. `VertexClient` is implemented and tested; one environment
   variable switches back. Those numbers describe the model that was tested.
 - **D1's measured effect is directional, not precise.** S1 5/10 → 2/10 with
-  spotlighting on; S2 9/10 → 6/10 and 3/10 → 1/10 across its two stages.
+  untrusted tagging on; S2 9/10 → 6/10 and 3/10 → 1/10 across its two stages.
+  A later, smaller run recorded in `replays/eval.md` moved those cells again,
+  which is the point: the number is a direction, not a measurement.
 - **The MCP server needs local installation**, so it's an extension of the
   hosted prototype rather than part of it.
 - **Nothing here is a product.** It's an argument, made executable: that the

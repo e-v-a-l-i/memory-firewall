@@ -97,6 +97,13 @@ ARMS = ("undefended", "defended")
 #: remains a CI fixture and a red-team target.
 UI_SCENARIOS = ("S1", "S2", "S4", "S5")
 
+#: What the demo calls each scenario on screen. The fixture ids are not a
+#: sequence — S3 is a real, tested scenario that is simply not in the picker
+#: (D-067) — and "S1, S2, S4, S5" makes a viewer wonder what was cut rather
+#: than watch the run. Ids stay ids everywhere else: they key the replay
+#: files, the eval table and the scenario matrix.
+UI_LABELS = {sid: f"Case {i}" for i, sid in enumerate(UI_SCENARIOS, start=1)}
+
 
 def _new_session_id() -> str:
     return secrets.token_urlsafe(16)
@@ -142,6 +149,14 @@ def _set_session_cookie(response, session_id: str) -> None:
 @app.get("/")
 def index(request: Request) -> FileResponse:
     response = FileResponse(STATIC_DIR / "index.html")
+    # Revalidate on every load. The whole demo is one HTML file, so a cached
+    # copy is a cached *build* — and a stale one is not obviously stale: the
+    # page renders, runs and looks right while showing a defense name, a
+    # scenario list or a default mode that no longer exists. That cost two
+    # takes while the recording run sheet was being written, and cost one
+    # more verifying this very deploy. `no-cache` still allows a 304, so the
+    # cost is a conditional request, not a re-download.
+    response.headers["Cache-Control"] = "no-cache, must-revalidate"
     if _session_id(request) is None:
         _set_session_cookie(response, _new_session_id())
     return response
@@ -189,11 +204,26 @@ def make_client(mode: str, scenario_id: str, arm: str, stage: int = 1):
     return clients_module.MockClient(gullible=True)
 
 
-def _replay_available(scenario_id: str = "S1", arm: str = "undefended", stage: int = 1) -> bool:
-    try:
-        clients_module.ReplayClient(scenario_id, arm, stage)
-    except Exception:
-        return False
+def _replay_available(scenario_id: str | None = None, arm: str | None = None,
+                      stage: int | None = None) -> bool:
+    """Is every recording the picker can ask for actually on disk?
+
+    Probing S1 alone used to be enough to advertise `replay_available: true`
+    while S4 and S5 had no recordings at all and 404'd the moment they were
+    picked. A capability flag has to describe the whole surface it claims.
+    """
+    if scenario_id is not None:
+        wanted = [(scenario_id, arm or "undefended", stage or 1)]
+    else:
+        wanted = []
+        for sid in UI_SCENARIOS:
+            stages = (1, 2) if load_scenario(sid).get("followup_alert_id") else (1,)
+            wanted += [(sid, a, st) for a in ("undefended", "defended") for st in stages]
+    for sid, a, st in wanted:
+        try:
+            clients_module.ReplayClient(sid, a, st)
+        except Exception:  # noqa: BLE001 - missing or unreadable is the same answer
+            return False
     return True
 
 
@@ -257,6 +287,12 @@ def api_scenarios(request: Request, response: Response) -> list:
         out.append(
             {
                 "id": scenario["id"],
+                # What the viewer is shown. The fixture ids are not a
+                # sequence — S3 is a real, tested scenario that is simply not
+                # in the demo (D-067) — and a picker reading "S1, S2, S4, S5"
+                # invites the one question the demo has no time to answer.
+                # The id stays the id: it keys the replays and the eval table.
+                "label": UI_LABELS.get(scenario["id"], scenario["id"]),
                 "name": scenario.get("name", ""),
                 "description": scenario.get("description", ""),
                 "alert_id": scenario["alert_id"],
@@ -1045,7 +1081,9 @@ def iter_scenario(
     trace.emit(
         "run_started",
         kind="model",
-        title=f"{scenario['id']}: {scenario.get('name', '')}".strip(": "),
+        title="{}: {}".format(
+            UI_LABELS.get(scenario["id"], scenario["id"]), scenario.get("name", "")
+        ).strip(": "),
         detail={
             "scenario": scenario["id"],
             "alert_id": alert_id,

@@ -484,6 +484,12 @@ Key tradeoffs, recorded as they are made (§12). Format:
   from the client is a control arm that can lie.
 
 ### D-041 Replays are mock-recorded, pending Vertex quota
+> **Superseded by D-057 and D-072.** The recordings are no longer mock-made:
+> live runs are served by Gemini (D-057) and every replay in `replays/` was
+> recorded from one (D-072). The Claude quota situation below is still
+> accurate, and it is why the provider changed. Kept because the reasoning
+> about what a mock-recorded table would have implied is the reason the live
+> recording mattered.
 - **Situation:** `agent-eva` has **zero Claude quota** on Vertex. `global` is
   the only region serving `claude-sonnet-5` for this project and returns
   `Quota exceeded for global_online_prediction_requests_per_base_model`;
@@ -721,7 +727,7 @@ is worse than one that gives none.)*
 - This is stated in the **header** of `replays/eval.md` and in a top-level
   README section, not in a footnote — a reader who skims must not come away
   believing these are Claude numbers (§10.4).
-- **Unaffected:** D2 and D3 are deterministic code, and all 22 scenarios in
+- **Unaffected:** D2 and D3 are deterministic code, and all 24 scenarios in
   the CI matrix run on `MockClient`. No test claim depends on which provider
   serves live traffic, so the enforcement results stand unchanged.
 - Replays are now recorded from real Gemini runs rather than synthesised from
@@ -958,3 +964,71 @@ landed as a follow-up commit. Findings worth recording beyond the fixes:
 - **D-061 stays in this log.** A decision that was made, applied and then
   reversed is a record of what happened; deleting it would leave the entries
   around it referring to a name that appears nowhere.
+
+### D-072 The recorded replay is chosen for whether the defenses act, not for the outcome
+- **Problem:** S4 and S5 had no recordings, and the existing rule — keep the
+  run matching each cell's *modal* outcome, stated in `record_representative`'s
+  docstring rather than here — can select a run in which
+  the model never asked for the privileged tool. A replay holds what the model
+  said; D1, D2 and D3 re-execute on playback. So that run renders a defended
+  column where nothing was blocked — not because a defense failed but because
+  there was nothing to block, which is the amber "nothing stopped it" verdict
+  and the reason S3 left the picker.
+- **Decision:** prefer runs in which the model *complied with* the scenario's
+  target call — the tool **and every argument the fixture names** — and, for a
+  two-stage scenario, carried through to the second stage; break the tie on the
+  modal outcome, as before. `choose_run` in `scripts/eval.py`.
+- **Compliance is measured on requested calls, not on the outcome.** The
+  outcome records calls that were *performed* (an M1 fix: a blocked call must
+  not score as the attacker winning), so in the defended arm a model that
+  complied and was stopped is indistinguishable from one that refused. Those
+  are opposite events and the selection has to tell them apart.
+- **The arguments matter, found the hard way.** Matching on the tool name alone
+  selected an S5 run that closed the alert as `resolved` on the model's own
+  reasoning rather than the `benign` the injection asked for — a recording of a
+  scenario about a working attack, with no attack in it.
+- **Why this is not cherry-picking the flattering run.** The criterion is
+  whether the enforcement layer was exercised, not whether it succeeded. In the
+  defended arm it selects *against* the run that would look best for D1 — a run
+  where the model refused on its own — and for one where D1 failed to persuade
+  it and the deterministic gate had to catch it. Every file now carries a
+  `selection` key naming the rule and the cell's true rate, and `eval.md` states
+  that the recordings are biased towards runs where something visibly happens
+  and that the rate column, not the replay, is the measurement.
+- **Two alignment bugs fixed on the way.** `run_cell` appended each stage's
+  flag as it happened but its trace only at the end, so a two-stage run failing
+  in stage 2 desynchronised `stage1` from `traces` — and every selection rule
+  indexes across the two. Flags, tokens and trace are now committed as a unit.
+  Separately, the table scored `attacker_goal_achieved` for every scenario,
+  which for S4 (`kind: legitimate`, no attacker) is False in every run: a column
+  of zeros reading as "the attack never worked" for a scenario that has no
+  attack. S4 now counts the correct action being taken, labelled in the table.
+
+### D-073 The demo counts 1–4, and says which mode it is actually in
+Four UI corrections, all of them things a viewer would have had to ask about.
+
+- **The picker now reads Case 1 – Case 4.** The fixture ids run S1, S2, S4, S5
+  because S3 left the picker (D-067) while remaining a real, tested scenario
+  with five red-team variants. Renumbering the fixtures would collide with it,
+  or delete D3's primary matrix coverage to free the number. A display label
+  (`UI_LABELS`, used by `/api/scenarios` and the `run_started` title) costs
+  nothing and the ids keep keying the replays, the matrix and the eval table.
+- **The mode badge described the wrong thing.** It printed `resolve_mode()` —
+  the service's default for a run that names no mode — and never updated when
+  the dropdown changed. On a `MODE=live` deployment it therefore read "mode:
+  live" permanently, next to a dropdown set to something else. It now names
+  what the *next run* will use, in words: "recorded real run", "scripted
+  model", "calling the model now".
+- **The page opens in `replay`, and so does autoplay.** Previously autoplay
+  forced `mock`, chosen when the recordings were incomplete. They are complete
+  now (D-072), and a recorded real run is as repeatable as a mock while being
+  a recording of a model that actually did this. Mock remains the fallback.
+- **`replay_available` probed S1 only.** It advertised `true` while S4 and S5
+  had no recordings and 404'd the moment they were picked. A capability flag
+  has to cover the surface it claims, so it now checks every scenario, arm and
+  stage the picker can ask for.
+
+Measured after the change: autoplay is **65 seconds**, an even 15.6s per case.
+The earlier "about 90 seconds" was an estimate, and a first attempt to measure
+it read three minutes — an artefact of a hidden browser tab, where timers are
+throttled. Worth knowing before recording, not after.

@@ -11,12 +11,11 @@ wrote the code**.
 
 | | |
 |---|---|
-| Milestones | 5 (M0–M4) |
-| Commits | 10 |
-| Source | ~4,050 lines |
-| Tests | 495, across 23 files, ~7,800 lines |
-| Scenarios | 22 |
-| Decisions recorded | 67 |
+| Milestones | 5 (M0–M4), plus the work after them |
+| Source | ~4,090 lines |
+| Tests | 526, across 25 files, ~8,200 lines |
+| Scenarios | 24 |
+| Decisions recorded | 76 |
 | Defects found in review | 18, of which 6 defeated a defense outright |
 
 ---
@@ -236,7 +235,7 @@ be a defense whose measured effect swung 33 points between identical runs.
   changing a gate, adding a toggle — none of it invalidated a single recorded
   run, because replays hold what the model *said*, and everything else
   re-executes.
-- **Writing decisions down as they were made.** 67 entries, including the ones
+- **Writing decisions down as they were made.** 76 entries, including the ones
   that later turned out wrong. Two entries had to be rewritten when reality
   moved (`D-054` described a state that no longer existed and contradicted an
   entry three below it). A decision log that is allowed to go stale is worse
@@ -257,5 +256,5 @@ be a defense whose measured effect swung 33 points between identical runs.
    cannot be exercised locally, and a check that skips silently is worse than
    one that fails: it reports green having tested nothing.
 5. **Click through the demo every milestone.** The database bug, the buried
-   verdict and the over-strict smoke check were all invisible to 495 tests and
-   obvious within one minute of using the thing.
+   verdict and the over-strict smoke check were all invisible to the whole
+   test suite and obvious within one minute of using the thing.
