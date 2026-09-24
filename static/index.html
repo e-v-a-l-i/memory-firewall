@@ -86,6 +86,29 @@
   .panel { margin-top: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
   .record { border: 1px solid var(--line); border-radius: 7px; padding: 8px; margin: 7px 0; }
   .empty { color: var(--muted); font-size: .86rem; }
+  /* Autoplay: a hands-free run of every scenario with the narration on
+     screen, so the demo can be recorded in one take with nothing to click. */
+  .caption {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    background: color-mix(in srgb, var(--card) 92%, transparent);
+    border-top: 2px solid var(--accent);
+    padding: 16px 22px 18px; backdrop-filter: blur(8px);
+  }
+  .caption .step {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--accent); margin-bottom: 4px;
+  }
+  .caption .line { font-size: 1.12rem; line-height: 1.45; max-width: 60rem; }
+  .caption .line em { color: var(--muted); font-style: normal; }
+  body.autoplay { padding-bottom: 150px; }
+  body.autoplay .controls .row > .row:first-child,
+  body.autoplay #reset { opacity: .35; pointer-events: none; }
+  .progress { display: flex; gap: 5px; margin-top: 10px; }
+  .progress span {
+    height: 3px; width: 34px; border-radius: 2px; background: var(--line);
+  }
+  .progress span.done { background: var(--accent); }
+  .progress span.now { background: var(--danger); }
   @media (max-width: 720px) {
     .grid { grid-template-columns: 1fr; }
     body { padding: 14px 12px 36px; }
@@ -158,6 +181,12 @@
     </div>
     <div id="quarantine"><p class="empty">Nothing saved yet.</p></div>
   </section>
+
+  <div class="caption" id="caption" hidden>
+    <div class="step" id="caption-step"></div>
+    <div class="line" id="caption-line"></div>
+    <div class="progress" id="caption-progress"></div>
+  </div>
 </main>
 
 <script>
@@ -389,6 +418,11 @@
         if (event.type === "done") {
           source.close();
           if (stage === 1 && (scenario.stages || 1) > 1) {
+            // stage 2 still to come; not finished yet
+          } else if (window.__runDone) {
+            window.__runDone(arm);
+          }
+          if (stage === 1 && (scenario.stages || 1) > 1) {
             var note = el("p", "hint", "Stage 2: the next alert on the same host.");
             byId("trace-" + arm).appendChild(note);
             startRun(arm, scenarioId, 2);
@@ -523,6 +557,131 @@
     });
     byId("defended-label").textContent = defendedLabel();
     loadQuarantine();
+
+    if (new URLSearchParams(location.search).get("autoplay") === "1") {
+      // Scenarios load asynchronously; wait until the picker is populated.
+      var tries = 0;
+      var waitForScenarios = setInterval(function () {
+        if (byId("scenario").options.length || ++tries > 40) {
+          clearInterval(waitForScenarios);
+          startAutoplay();
+        }
+      }, 150);
+    }
+  }
+
+
+  // --- autoplay ------------------------------------------------------------
+  //
+  // A hands-free pass through every scenario with the narration on screen.
+  // The point is a recordable demo that needs no clicking and no voiceover:
+  // whoever is watching reads the caption while the run streams underneath it.
+
+  var SCRIPT = [
+    { id: "S1",
+      pre: "A security agent investigating an alert. The same alert runs twice — " +
+           "left with no defenses, right with them on.",
+      post: "Left: a line of web-server log had an instruction hidden inside it, " +
+            "and the agent obeyed it and closed the case. Right: the tool refused " +
+            "to run. We didn't make the agent smarter — we made the dangerous " +
+            "action refuse to fire." },
+    { id: "S2",
+      pre: "Two alerts in sequence. Watch what survives between them.",
+      post: "The first alert saved a stranger's claim as a permanent fact. The " +
+            "second alert — a real credential theft — was waved through because " +
+            "of it. Nothing attacked the second run. It just believed what the " +
+            "first one filed." },
+    { id: "S4",
+      pre: "No attacker in this one at all. This is the company's own scanner, " +
+           "and closing the alert is the correct answer.",
+      post: "Left got it right. Right refused a legitimate action — because " +
+            "stranger-written text exists somewhere in the evidence, which is " +
+            "true for 25 of the 26 alerts here. This is what the defense costs." },
+    { id: "S5",
+      pre: "The first attack again, moved one field sideways — into text our own " +
+           "system writes, but which copies the visitor's words into it.",
+      post: "Every defense on, and the attack still works. Not bypassed: never " +
+            "engaged. All three hang off one label — was this written by us, or " +
+            "by a stranger — and that label was wrong." }
+  ];
+
+  var autoplayState = null;
+
+  function showCaption(step, text) {
+    var box = byId("caption");
+    box.hidden = false;
+    byId("caption-step").textContent = step;
+    byId("caption-line").textContent = text;
+    var bar = byId("caption-progress");
+    clear(bar);
+    SCRIPT.forEach(function (entry, i) {
+      var pip = el("span");
+      if (autoplayState && i < autoplayState.index) pip.className = "done";
+      else if (autoplayState && i === autoplayState.index) pip.className = "now";
+      bar.appendChild(pip);
+    });
+  }
+
+
+  function revealInjection() {
+    // The red-bordered chunk in the undefended column: where the attack
+    // physically entered.
+    var mark = document.querySelector("#trace-undefended .chunk.untrusted");
+    if (mark) mark.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function revealVerdicts() {
+    // Prefer the defended column's outcome: it is the one that differs.
+    var outcomes = document.querySelectorAll("#trace-defended .outcome");
+    var target = outcomes[outcomes.length - 1] ||
+                 document.querySelector("#trace-undefended .outcome");
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function autoplayNext() {
+    if (!autoplayState || autoplayState.index >= SCRIPT.length) {
+      showCaption("End", "Two ideas: put the control where the model's judgement " +
+        "isn't load-bearing — and know where your text came from.");
+      return;
+    }
+    var entry = SCRIPT[autoplayState.index];
+    var select = byId("scenario");
+    select.value = entry.id;
+    showNote();
+    showCaption(entry.id + " — setting up", entry.pre);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+
+    autoplayState.finished = {};
+    window.__runDone = function (arm) {
+      autoplayState.finished[arm] = true;
+      if (autoplayState.finished.undefended && autoplayState.finished.defended) {
+        window.__runDone = null;
+        // Two camera moves, because the two things worth seeing are at
+        // opposite ends of a long column: the chunk the attack arrived in,
+        // then the verdict it produced.
+        revealInjection();
+        setTimeout(function () {
+          showCaption(entry.id + " — what just happened", entry.post);
+          revealVerdicts();
+        }, 3000);
+        setTimeout(function () {
+          autoplayState.index += 1;
+          autoplayNext();
+        }, 12000);
+      }
+    };
+    setTimeout(run, 3500);
+  }
+
+  function startAutoplay() {
+    document.body.classList.add("autoplay");
+    autoplayState = { index: 0, finished: {} };
+    // Mock mode is deterministic, so a recording is identical every take.
+    byId("mode-select").value = "mock";
+    ["d1", "d2", "d3"].forEach(function (id) { byId(id).checked = true; });
+    byId("defended-label").textContent = defendedLabel();
+    showCaption("Starting", "Hands-free run of all four scenarios.");
+    setTimeout(autoplayNext, 2500);
   }
 
   function showNote() {
